@@ -72,6 +72,8 @@ pub static APP_HWND:    AtomicUsize = AtomicUsize::new(0);  // HWND as usize
 pub static PANIC_START: AtomicU32   = AtomicU32::new(0);    // GetTickCount() snapshot
 
 pub fn install(hwnd: HWND) -> Result<(), &'static str>;
+// Err("Failed to install keyboard hook") or Err("Failed to install mouse hook")
+// Caller must MessageBoxW + ExitProcess(1) on Err — running without hooks is silent failure
 pub fn uninstall();
 // keyboard_proc / mouse_proc are private extern "system" fn — registered as callbacks
 ```
@@ -83,19 +85,34 @@ impl TrayIcon {
     pub fn new(hwnd: HWND) -> Self;
     pub fn set_locked(&mut self, locked: bool);
     pub fn show_balloon(&self, title: &str, msg: &str);
-    pub fn show_menu(&self, hwnd: HWND);
+    pub fn show_menu(&self, hwnd: HWND, locked: bool);  // greys out Lock when locked, Unlock when unlocked
     pub fn destroy(&mut self);
 }
 ```
 
 **`app.rs`**
 ```rust
-pub fn lock();
-pub fn unlock();
-pub fn toggle();
+pub fn lock(hwnd: HWND);    // retrieves TrayIcon via GetWindowLongPtrW(GWLP_USERDATA)
+pub fn unlock(hwnd: HWND);
+pub fn toggle(hwnd: HWND);
 pub fn set_autostart(enable: bool);
 pub fn is_autostart() -> bool;
 pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT;
+```
+
+**TrayIcon storage:** After `TrayIcon::new(hwnd)` in `main.rs`, store a heap pointer in window user data:
+```rust
+let tray = Box::new(TrayIcon::new(hwnd));
+SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(tray) as isize);
+```
+In `wnd_proc` and `lock()`/`unlock()`, retrieve it:
+```rust
+let tray = &mut *(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut TrayIcon);
+```
+On `WM_DESTROY`, free it:
+```rust
+let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut TrayIcon;
+if !ptr.is_null() { drop(Box::from_raw(ptr)); }
 ```
 
 **`updater.rs`**
@@ -105,13 +122,13 @@ pub fn spawn(hwnd: HWND); // OS thread; posts WM_UPDATE_RESULT when done
 
 **`main.rs` init sequence**
 ```rust
-// 1. CreateMutexW("Global\\WraithSingleInstance") — exit if already exists
+// 1. CreateMutexW("Global\\WraithSingleInstance") — if ERROR_ALREADY_EXISTS: MessageBoxW("Wraith is already running.") then exit
 // 2. Config::load() stored in OnceLock
 // 3. RegisterClassExW + CreateWindowExW(HWND_MESSAGE) → hwnd
 // 4. APP_HWND.store(hwnd as usize, Relaxed)
-// 5. TrayIcon::new(hwnd)
-// 6. hooks::install(hwnd)
-// 7. if Config::get().lock_on_start { app::lock() }
+// 5. Box::new(TrayIcon::new(hwnd)) → SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr)
+// 6. hooks::install(hwnd) — on Err: MessageBoxW(err_str) then ExitProcess(1)
+// 7. if Config::get().lock_on_start { app::lock(hwnd) }
 // 8. updater::spawn(hwnd)
 // 9. GetMessageW loop (drives hook pump + processes app messages)
 ```
@@ -135,6 +152,8 @@ Physical keypress
     ▼
 keyboard_proc (hooks.rs)
     │
+    ├─ nCode < 0? ──────────YES─► CallNextHookEx (mandatory, no processing)
+    │
     ├─ LLKHF_INJECTED set? ─YES─► CallNextHookEx (pass through)
     │
     ├─ == lock combo? ──────YES─► PostMessageW(WM_COMMAND, ID_LOCK) + consume
@@ -144,13 +163,27 @@ keyboard_proc (hooks.rs)
     └─ LOCKED == true? ─────YES─► return 1 (block — do NOT call CallNextHookEx)
                            NO──► CallNextHookEx (pass through)
 
+mouse_proc (hooks.rs)
+    │
+    ├─ nCode < 0? ──────────────YES─► CallNextHookEx (mandatory)
+    │
+    ├─ LLMHF_INJECTED set? ─────YES─► CallNextHookEx (pass through)
+    │   (flags & 0x01)
+    │
+    └─ LOCKED == true? ─────────YES─► return 1 (block all: moves, clicks, scroll, wheel)
+                               NO──► CallNextHookEx (pass through)
+
 GetMessageW loop → DispatchMessageW → wnd_proc (app.rs)
-    ├─ WM_COMMAND / ID_LOCK        → app::lock()
-    ├─ WM_COMMAND / ID_UNLOCK      → app::unlock()
-    ├─ WM_TRAY_MSG + RMB           → tray.show_menu()
-    ├─ WM_TRAY_MSG + double-click  → app::toggle()
+    ├─ WM_COMMAND / LOWORD(wp)==ID_LOCK   → app::lock(hwnd)
+    ├─ WM_COMMAND / LOWORD(wp)==ID_UNLOCK → app::unlock(hwnd)
+    ├─ WM_TRAY_MSG + lp==WM_RBUTTONUP||WM_CONTEXTMENU → tray.show_menu(hwnd, LOCKED.load(Relaxed))
+    ├─ WM_TRAY_MSG + lp==WM_LBUTTONDBLCLK            → app::toggle(hwnd)  // bypasses hook — intentional escape for RDP users
+    // WM_LBUTTONUP (single click) ignored
     ├─ WM_TIMER / TIMER_PANIC      → GetAsyncKeyState(panic_vk); if ≥3000ms → unlock()
-    ├─ WM_UPDATE_RESULT            → tray.show_balloon(); free heap Box
+    ├─ WM_UPDATE_RESULT            → tray.show_balloon(); Box::from_raw(lp as *mut String) to free
+    // NOTE: WM_ENDSESSION and WM_QUERYENDSESSION are NOT received by HWND_MESSAGE windows
+    // (message-only windows are not top-level — shutdown broadcasts skip them).
+    // OS reclaims hooks and tray icon on process termination — no cleanup handler needed.
     └─ WM_DESTROY                  → hooks::uninstall(), tray.destroy(), PostQuitMessage(0)
 ```
 
@@ -167,8 +200,10 @@ SetWindowsHookExW(idHook, lpfn, hmod=NULL, dwThreadId=0) -> HHOOK
 CallNextHookEx(hhk, nCode, wParam, lParam) -> LRESULT
 UnhookWindowsHookEx(hhk) -> BOOL
 
-KBDLLHOOKSTRUCT { vkCode: u32, scanCode: u32, flags: u32, time: u32, dwExtraInfo: usize }
-    flags & 0x10 = LLKHF_INJECTED
+KBDLLHOOKSTRUCT { vkCode: u32, scanCode: u32, flags: KBDLLHOOKSTRUCT_FLAGS, time: u32, dwExtraInfo: usize }
+    // KBDLLHOOKSTRUCT_FLAGS = pub type KBDLLHOOKSTRUCT_FLAGS = u32  (transparent alias, NOT newtype)
+    // Direct bitwise works: flags & 0x10 != 0  — no cast needed
+    flags & 0x10 = LLKHF_INJECTED  (bit4; ALWAYS set when LLKHF_LOWER_IL_INJECTED bit1 is set)
 
 MSLLHOOKSTRUCT { pt: POINT, mouseData: u32, flags: u32, time: u32, dwExtraInfo: usize }
     flags & 0x01 = LLMHF_INJECTED
@@ -211,9 +246,9 @@ SetThreadExecutionState(ES_CONTINUOUS)                                          
 ### Config (INI)
 ```
 GetPrivateProfileIntW(lpAppName, lpKeyName, nDefault, lpFileName) -> i32
-WritePrivateProfileStringW(lpAppName, lpKeyName, lpString, lpFileName) -> BOOL
 INI path: resolve relative to GetModuleFileNameW()
 ```
+INI is read-only at runtime. No write-back. Edit the file and restart to change config.
 
 ### Registry (Auto-start)
 ```
@@ -227,8 +262,9 @@ APIs: RegOpenKeyExW / RegSetValueExW / RegDeleteValueW / RegCloseKey
 WinHttpOpen → WinHttpConnect("api.github.com", 443)
 → WinHttpOpenRequest(GET, "/repos/shadow-dragon-2002/Wraith/releases/latest", WINHTTP_FLAG_SECURE=0x00800000)
 → WinHttpSendRequest → WinHttpReceiveResponse → WinHttpReadData loop → WinHttpCloseHandle
-Parse: str::find("tag_name") → extract value → strip 'v' → compare to env!("CARGO_PKG_VERSION")
-No JSON crate needed.
+Parse: str::find("tag_name") → extract value → strip leading 'v' (tags must be vX.Y.Z)
+Compare: parse both strings as (u32, u32, u32) tuples, compare numerically. No string compare — "1.10.0" > "1.9.0" must hold.
+No JSON crate needed. No semver crate needed (~10 lines).
 ```
 
 ---
@@ -262,7 +298,7 @@ edition     = "2021"
 authors     = ["shadow-dragon-2002"]
 description = "Physical input blocker — passes synthetic AI input, blocks hardware"
 repository  = "https://github.com/shadow-dragon-2002/Wraith"
-license     = "MIT"
+license-file = "LICENSE"
 
 [[bin]]
 name = "wraith"
@@ -295,7 +331,7 @@ cargo build --release --target x86_64-pc-windows-gnu
 # Output: target/x86_64-pc-windows-gnu/release/wraith.exe
 ```
 
-Optional `build.rs` if WinHTTP linker doesn't auto-resolve:
+**Required** `build.rs` for WinHTTP on GNU target (windows-sys does NOT auto-link winhttp.lib for GNU):
 ```rust
 fn main() { println!("cargo:rustc-link-lib=winhttp"); }
 ```
@@ -316,6 +352,7 @@ Build in this order — each step independently testable before moving on:
 
 **Step 3 — Tray**
 `tray.rs`: `Shell_NotifyIconW` add/modify/delete, `WM_TRAY_MSG` routing, `CreatePopupMenu` + `TrackPopupMenu`, balloon helper.
+Icon loading: `LoadImageW` from embedded resources; fall back to `LoadIconW(null_mut(), IDI_APPLICATION)` if that fails. Fallback stays permanently as a safety net — Step 9 adds the real embedded icon.
 ✓ Icon visible, right-click menu works, double-click fires.
 
 **Step 4 — Hooks (core)**
@@ -333,7 +370,8 @@ Build in this order — each step independently testable before moving on:
 
 **Step 6 — Panic Unlock**
 `WM_TIMER / TIMER_PANIC` at 100ms (set on lock, kill on unlock):
-`GetAsyncKeyState(config.panic_vk) & 0x8000 != 0` → if `PANIC_START == 0` set it to `GetTickCount()`; if held ≥ 3000ms → `unlock()`. Release → reset `PANIC_START` to 0.
+`GetAsyncKeyState(config.panic_vk) & 0x8000 != 0` → if `PANIC_START == 0` set it to `GetTickCount()`; then check `GetTickCount().wrapping_sub(PANIC_START.load(Relaxed)) >= 3000` → `unlock(hwnd)`. Release → reset `PANIC_START` to 0.
+Use `wrapping_sub` explicitly — `GetTickCount()` is `u32` and rolls over at ~49.7 days.
 ✓ Hold Esc 3s → unlocks. Short hold stays locked.
 
 **Step 7 — Auto-start**
@@ -351,11 +389,17 @@ Resource embedding: `x86_64-w64-mingw32-windres src/resource.rc -o target/resour
 
 ## Key Constraints
 
-**Hook callback timeout:** ~200ms. If callback doesn't return, Windows **silently removes the hook** — blocking stops with no error. Rules: no blocking, no I/O, no mutex waits, no function calls that can block. Max: a few comparisons + one `PostMessageW` or `CallNextHookEx`.
+**`nCode < 0` must short-circuit:** First line of every hook proc — if `n_code < 0`, call `CallNextHookEx(0, n_code, w_param, l_param)` and return immediately. No flag checks, no blocking logic. MSDN mandates this; skipping it is undefined behavior across the input pipeline.
+
+**Hook callback timeout:** Hard cap is 1000ms on Win10 1709+ (HKCU\Control Panel\Desktop\LowLevelHooksTimeout; default value applies). Keep under 200ms for safety margin. If callback doesn't return in time, Windows **silently removes the hook** — blocking stops with no error, no notification. Rules: no blocking, no I/O, no mutex waits, no function calls that can block. Max: a few comparisons + one `PostMessageW` or `CallNextHookEx`.
 
 **Message pump is mandatory:** `WH_KEYBOARD_LL` / `WH_MOUSE_LL` with `dwThreadId=0` are driven by the installing thread's `GetMessageW` loop. If main thread blocks, hooks stop firing. Nothing else may block the main thread.
 
 **`PostMessageW` not `SendMessageW`:** `SendMessageW` from a hook callback is synchronous — deadlocks because the WndProc runs on the same thread. `PostMessageW` only.
+
+**`SetThreadExecutionState` is thread-scoped:** Must be called from the main thread only. `lock()`/`unlock()` are only ever called from WndProc (main thread) — never from hook callbacks or the updater thread. This invariant must hold or sleep prevention silently does nothing.
+
+**`WM_COMMAND` dispatch uses `LOWORD(wp)`:** `wParam` is packed — low word = ID, high word = notification code. Always match on `LOWORD(wp) == ID_*`, never `wp == ID_*`.
 
 **`GetAsyncKeyState` for panic:** Hook blocks the keystroke (`return 1`), so `GetMessage`-based detection won't see it. `GetAsyncKeyState` reads raw hardware state regardless — use it for the panic hold timer.
 
@@ -382,11 +426,14 @@ fn wide(s: &str) -> Vec<u16> {
 - **No `windows` crate** (high-level) — use `windows-sys`. Better GNU support.
 - **No async runtime** — not needed. `std::thread::spawn` + `PostMessageW` is sufficient.
 - **No JSON crate** — parse `tag_name` with `str::find`. No `serde` needed.
+- **No semver crate** — parse `(u32, u32, u32)` and compare numerically. Tags must follow `vX.Y.Z` exactly.
 - **No Ctrl+Alt+Del blocking** — impossible in user mode. Don't try.
 
 ---
 
 ## `wraith.ini` (ship alongside .exe)
+
+Key combos and panic key are user-configurable by editing this file and restarting Wraith.
 
 ```ini
 ; Modifier bitmask: MOD_ALT=1, MOD_CONTROL=2, MOD_SHIFT=4, MOD_WIN=8
