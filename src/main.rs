@@ -120,7 +120,10 @@ fn main() {
 
         // 5. Create tray icon, store pointer in GWLP_USERDATA
         let tray = Box::new(tray::TrayIcon::new(hwnd));
-        app::store_tray(hwnd, tray);
+        windows_sys::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(
+            hwnd, windows_sys::Win32::UI::WindowsAndMessaging::GWLP_USERDATA,
+            Box::into_raw(tray) as isize,
+        );
 
         // 6. Install low-level hooks (also stores APP_HWND) -- exit on failure
         if let Err(e) = hooks::install(hwnd) {

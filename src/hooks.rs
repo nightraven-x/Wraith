@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering::Relaxed};
 
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+    System::SystemInformation::GetTickCount,
     UI::{
         Input::KeyboardAndMouse::GetAsyncKeyState,
         WindowsAndMessaging::{
@@ -15,11 +16,37 @@ use windows_sys::Win32::{
     },
 };
 
-pub static LOCKED:      AtomicBool  = AtomicBool::new(false);
-pub static KB_HOOK:     AtomicUsize = AtomicUsize::new(0); // HHOOK as usize
-pub static MOUSE_HOOK:  AtomicUsize = AtomicUsize::new(0); // HHOOK as usize
-pub static APP_HWND:    AtomicUsize = AtomicUsize::new(0); // HWND as usize
-pub static PANIC_START: AtomicU32   = AtomicU32::new(0);   // GetTickCount() snapshot
+pub static LOCKED:   AtomicBool  = AtomicBool::new(false);
+pub static APP_HWND: AtomicUsize = AtomicUsize::new(0); // HWND as usize
+
+static KB_HOOK:     AtomicUsize = AtomicUsize::new(0); // HHOOK as usize
+static MOUSE_HOOK:  AtomicUsize = AtomicUsize::new(0); // HHOOK as usize
+static PANIC_START: AtomicU32   = AtomicU32::new(0);   // GetTickCount() snapshot
+
+/// Advance the panic-key hold timer. Returns true when the panic key has been
+/// held for >= 3000ms and unlock should fire. Must be called on every TIMER_PANIC tick.
+pub fn panic_key_tick() -> bool {
+    let panic_vk = crate::config::Config::get().panic_vk;
+    let held = (unsafe { GetAsyncKeyState(panic_vk as i32) } as u16) & 0x8000 != 0;
+    if held {
+        let now = unsafe { GetTickCount() };
+        let start = PANIC_START.load(Relaxed);
+        if start == 0 {
+            PANIC_START.store(now, Relaxed);
+            false
+        } else {
+            now.wrapping_sub(start) >= 3000
+        }
+    } else {
+        PANIC_START.store(0, Relaxed);
+        false
+    }
+}
+
+/// Reset the panic hold timer. Call from unlock().
+pub fn panic_reset() {
+    PANIC_START.store(0, Relaxed);
+}
 
 pub fn install(hwnd: HWND) -> Result<(), &'static str> {
     APP_HWND.store(hwnd as usize, Relaxed);

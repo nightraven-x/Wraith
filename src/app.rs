@@ -15,10 +15,8 @@ use windows_sys::Win32::{
             RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
             HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ,
         },
-        SystemInformation::GetTickCount,
     },
     UI::{
-        Input::KeyboardAndMouse::GetAsyncKeyState,
         WindowsAndMessaging::{
             DefWindowProcW, DestroyWindow, GetWindowLongPtrW, KillTimer, PostQuitMessage,
             SetTimer, SetWindowLongPtrW, GWLP_USERDATA, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY,
@@ -49,7 +47,7 @@ pub fn unlock(hwnd: HWND) {
     unsafe {
         KillTimer(hwnd, TIMER_PANIC);
     }
-    hooks::PANIC_START.store(0, Relaxed);
+    hooks::panic_reset();
     unsafe {
         SetThreadExecutionState(ES_CONTINUOUS);
         tray_from_hwnd(hwnd).set_locked(false);
@@ -119,18 +117,12 @@ pub fn is_autostart() -> bool {
     }
 }
 
-pub fn store_tray(hwnd: HWND, tray: Box<TrayIcon>) {
-    unsafe {
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(tray) as isize);
-    }
-}
-
 pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_TRAY_MSG => {
             let event = (lp as u32) & 0xFFFF;
             if event == WM_RBUTTONUP || event == WM_CONTEXTMENU {
-                tray_from_hwnd(hwnd).show_menu(hwnd, LOCKED.load(Relaxed));
+                tray_from_hwnd(hwnd).show_menu(hwnd);
             } else if event == WM_LBUTTONDBLCLK {
                 toggle(hwnd);
             }
@@ -152,23 +144,8 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         }
 
         WM_TIMER => {
-            if wp == TIMER_PANIC {
-                if !LOCKED.load(Relaxed) { return 0; }
-                let cfg = crate::config::Config::get();
-                // GetAsyncKeyState works even when the hook blocks the physical event.
-                // Bit 15 set = key currently held down.
-                let held = (GetAsyncKeyState(cfg.panic_vk as i32) as u16) & 0x8000 != 0;
-                if held {
-                    let now = GetTickCount();
-                    let start = hooks::PANIC_START.load(Relaxed);
-                    if start == 0 {
-                        hooks::PANIC_START.store(now, Relaxed);
-                    } else if now.wrapping_sub(start) >= 3000 {
-                        unlock(hwnd);
-                    }
-                } else {
-                    hooks::PANIC_START.store(0, Relaxed);
-                }
+            if wp == TIMER_PANIC && LOCKED.load(Relaxed) && hooks::panic_key_tick() {
+                unlock(hwnd);
             }
             0
         }

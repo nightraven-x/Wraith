@@ -69,15 +69,15 @@ impl TrayIcon {
         unsafe { Shell_NotifyIconW(NIM_MODIFY, &nid); }
     }
 
-    pub fn show_menu(&self, hwnd: HWND, locked: bool) {
+    pub fn show_menu(&self, hwnd: HWND) {
         unsafe {
             let menu = CreatePopupMenu();
             if menu.is_null() {
                 return;
             }
 
-            let lock_flags     = MF_STRING | if locked  { MF_GRAYED  } else { 0 };
-            let unlock_flags   = MF_STRING | if !locked { MF_GRAYED  } else { 0 };
+            let lock_flags     = MF_STRING | if self.locked  { MF_GRAYED  } else { 0 };
+            let unlock_flags   = MF_STRING | if !self.locked { MF_GRAYED  } else { 0 };
             let autostart_flags =
                 MF_STRING | if crate::app::is_autostart() { MF_CHECKED } else { 0 };
 
