@@ -225,7 +225,7 @@ APIs: RegOpenKeyExW / RegSetValueExW / RegDeleteValueW / RegCloseKey
 ### WinHTTP (Update Checker)
 ```
 WinHttpOpen → WinHttpConnect("api.github.com", 443)
-→ WinHttpOpenRequest(GET, "/repos/nightraven/wraith/releases/latest", WINHTTP_FLAG_SECURE=0x00800000)
+→ WinHttpOpenRequest(GET, "/repos/shadow-dragon-2002/Wraith/releases/latest", WINHTTP_FLAG_SECURE=0x00800000)
 → WinHttpSendRequest → WinHttpReceiveResponse → WinHttpReadData loop → WinHttpCloseHandle
 Parse: str::find("tag_name") → extract value → strip 'v' → compare to env!("CARGO_PKG_VERSION")
 No JSON crate needed.
@@ -259,9 +259,9 @@ rustflags = ["-C", "link-arg=-Wl,--subsystem,windows"]
 name        = "wraith"
 version     = "1.0.0"
 edition     = "2021"
-authors     = ["nightraven"]
+authors     = ["shadow-dragon-2002"]
 description = "Physical input blocker — passes synthetic AI input, blocks hardware"
-repository  = "https://github.com/nightraven/wraith"
+repository  = "https://github.com/shadow-dragon-2002/Wraith"
 license     = "MIT"
 
 [[bin]]
@@ -341,7 +341,7 @@ Build in this order — each step independently testable before moving on:
 ✓ Enable → reboot → Wraith launches. State persists.
 
 **Step 8 — Update Checker**
-`updater.rs`: `std::thread::spawn`, WinHTTP GET `api.github.com/repos/nightraven/wraith/releases/latest`, parse `tag_name`, `Box::new(result)` → `PostMessageW(APP_HWND, WM_UPDATE_RESULT, 0, Box::into_raw(...) as LPARAM)`. WndProc frees the Box and shows balloon.
+`updater.rs`: `std::thread::spawn`, WinHTTP GET `api.github.com/repos/shadow-dragon-2002/Wraith/releases/latest`, parse `tag_name`, `Box::new(result)` → `PostMessageW(APP_HWND, WM_UPDATE_RESULT, 0, Box::into_raw(...) as LPARAM)`. WndProc frees the Box and shows balloon.
 ✓ Downgraded version → balloon. Network error → silent fail.
 
 **Step 9 — Polish**
@@ -488,7 +488,7 @@ wraith/
 
 ### Issue tracker
 
-Issues live in GitHub Issues on `nightraven/wraith`. See `docs/agents/issue-tracker.md`.
+Issues live in GitHub Issues on `shadow-dragon-2002/Wraith`. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
@@ -500,4 +500,4 @@ Single-context repo. Domain glossary: `CONTEXT.md` at repo root. Architecture de
 
 ---
 
-*Built by nightraven. MIT license. https://github.com/nightraven/wraith*
+*Built by shadow-dragon-2002. MIT license. https://github.com/shadow-dragon-2002/Wraith*

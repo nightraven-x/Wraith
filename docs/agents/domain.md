@@ -1,29 +1,39 @@
 # Domain Docs
 
-This is a **single-context** repository.
+How the engineering skills should consume this repo's domain documentation when exploring the codebase.
 
-## Domain glossary
+## Before exploring, read these
 
-`CONTEXT.md` at the repo root. This is the canonical source of domain vocabulary. Skills must use the terms defined there. `/grill-with-docs` and `/improve-codebase-architecture` update it inline as decisions crystallise.
+- **`CONTEXT.md`** at the repo root — canonical domain vocabulary. Use the exact terms defined there.
+- **`docs/adr/`** — read ADRs that touch the area you're about to work in.
 
-Rules for reading:
-- Use the exact terms from the **Language** section when naming modules, functions, tests, and issues
-- Do not add implementation details to `CONTEXT.md` — it is a glossary only
-- When a term is fuzzy or missing, surface it during a grill session before naming things
+If any of these files don't exist, proceed silently.
 
-## Architecture decisions
+## File structure
 
-`docs/adr/` at the repo root. Individual files named `NNNN-slug.md`.
+Single-context repo:
 
-Current ADRs:
-- `0001-rust-over-cpp-go.md` — why Rust (not Go or C++)
-- `0002-windows-sys-over-windows-crate.md` — why windows-sys (not windows crate)
-- `0003-global-atomics-over-mutex.md` — why atomics (not Mutex) for hook state
-- `0004-postmessagew-from-hooks.md` — why PostMessageW (not SendMessageW or direct calls)
-- `0005-panic-abort-in-release.md` — why panic=abort in release profile
-- `0006-no-async-runtime.md` — why std::thread (not Tokio)
+```
+/
+├── CONTEXT.md
+├── docs/adr/
+│   ├── 0001-rust-over-cpp-go.md
+│   ├── 0002-windows-sys-over-windows-crate.md
+│   ├── 0003-global-atomics-over-mutex.md
+│   ├── 0004-postmessagew-from-hooks.md
+│   ├── 0005-panic-abort-in-release.md
+│   └── 0006-no-async-runtime.md
+└── src/
+```
 
-Rules for reading:
-- Do not re-litigate decisions already recorded in an ADR unless the friction is significant enough to warrant reopening it
-- When proposing a change that contradicts an ADR, flag it explicitly ("contradicts ADR-0003 — worth reopening because…")
-- New ADRs: only when the decision is hard to reverse, surprising without context, and the result of a real trade-off
+## Use the glossary's vocabulary
+
+When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in `CONTEXT.md`. Don't drift to synonyms the glossary explicitly avoids.
+
+If the concept you need isn't in the glossary yet, that's a signal — either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/domain-modeling`).
+
+## Flag ADR conflicts
+
+If your output contradicts an existing ADR, surface it explicitly rather than silently overriding:
+
+> _Contradicts ADR-0003 (global atomics over mutex) — but worth reopening because…_
