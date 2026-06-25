@@ -79,7 +79,7 @@ impl TrayIcon {
             let lock_flags     = MF_STRING | if self.locked  { MF_GRAYED  } else { 0 };
             let unlock_flags   = MF_STRING | if !self.locked { MF_GRAYED  } else { 0 };
             let autostart_flags =
-                MF_STRING | if crate::app::is_autostart() { MF_CHECKED } else { 0 };
+                MF_STRING | if crate::autostart::is_enabled() { MF_CHECKED } else { 0 };
 
             AppendMenuW(menu, lock_flags,      ID_LOCK,      to_wide("Lock").as_ptr());
             AppendMenuW(menu, unlock_flags,    ID_UNLOCK,    to_wide("Unlock").as_ptr());
@@ -120,7 +120,10 @@ impl TrayIcon {
         }
     }
 
-    pub fn destroy(&mut self) {
+}
+
+impl Drop for TrayIcon {
+    fn drop(&mut self) {
         let nid = blank_nid(self.hwnd);
         unsafe { Shell_NotifyIconW(NIM_DELETE, &nid); }
     }

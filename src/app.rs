@@ -1,120 +1,52 @@
-// Wraith — lock/unlock logic, WndProc, auto-start
-// Step 5: lock() / unlock() + SetThreadExecutionState
-// Step 6: panic unlock via WM_TIMER + GetAsyncKeyState
-// Step 7: set_autostart() / is_autostart()
+// Wraith — lock/unlock logic, WndProc
 
 use std::sync::atomic::Ordering::Relaxed;
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, WPARAM},
-    System::{
-        LibraryLoader::GetModuleFileNameW,
-        Power::{
-            SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED,
-        },
-        Registry::{
-            RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
-            HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ,
-        },
+    System::Power::{
+        SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED,
     },
-    UI::{
-        WindowsAndMessaging::{
-            DefWindowProcW, DestroyWindow, GetWindowLongPtrW, KillTimer, PostQuitMessage,
-            SetTimer, SetWindowLongPtrW, GWLP_USERDATA, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY,
-            WM_LBUTTONDBLCLK, WM_RBUTTONUP, WM_TIMER,
-        },
+    UI::WindowsAndMessaging::{
+        DefWindowProcW, DestroyWindow, KillTimer, PostQuitMessage,
+        SetTimer, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY,
+        WM_LBUTTONDBLCLK, WM_RBUTTONUP, WM_TIMER,
     },
 };
 
 use crate::{
-    hooks::{self, LOCKED},
+    hooks::{self, APP_HWND, APP_TRAY, LOCKED},
     tray::TrayIcon,
-    ID_AUTOSTART, ID_EXIT, ID_LOCK, ID_UNLOCK, TIMER_PANIC, WM_TRAY_MSG, WM_UPDATE_RESULT,
+    ID_AUTOSTART, ID_EXIT, ID_LOCK, ID_UNLOCK, TIMER_PANIC, TIMER_WATCHDOG, WM_TRAY_MSG,
+    WM_UPDATE_RESULT,
 };
 
-pub fn lock(hwnd: HWND) {
+pub fn lock() {
     if LOCKED.load(Relaxed) { return; }
     LOCKED.store(true, Relaxed);
+    crate::lock_policy::apply();
+    let hwnd = APP_HWND.load(Relaxed) as HWND;
     unsafe {
         SetTimer(hwnd, TIMER_PANIC, 100, None);
         SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
-        tray_from_hwnd(hwnd).set_locked(true);
+        tray().set_locked(true);
     }
 }
 
-pub fn unlock(hwnd: HWND) {
+pub fn unlock() {
     if !LOCKED.load(Relaxed) { return; }
     LOCKED.store(false, Relaxed);
-    unsafe {
-        KillTimer(hwnd, TIMER_PANIC);
-    }
+    crate::lock_policy::remove();
+    let hwnd = APP_HWND.load(Relaxed) as HWND;
+    unsafe { KillTimer(hwnd, TIMER_PANIC); }
     hooks::panic_reset();
     unsafe {
         SetThreadExecutionState(ES_CONTINUOUS);
-        tray_from_hwnd(hwnd).set_locked(false);
+        tray().set_locked(false);
     }
 }
 
-pub fn toggle(hwnd: HWND) {
-    if LOCKED.load(Relaxed) {
-        unlock(hwnd);
-    } else {
-        lock(hwnd);
-    }
-}
-
-pub fn set_autostart(enable: bool) {
-    let run_key = to_wide("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
-    let value_name = to_wide("Wraith");
-    unsafe {
-        let mut hkey: HKEY = std::ptr::null_mut();
-        if RegOpenKeyExW(HKEY_CURRENT_USER, run_key.as_ptr(), 0, KEY_SET_VALUE, &mut hkey) != 0 {
-            return;
-        }
-        if enable {
-            let mut raw = [0u16; 510];
-            let len = GetModuleFileNameW(std::ptr::null_mut(), raw.as_mut_ptr(), raw.len() as u32) as usize;
-            // Wrap in double quotes so paths with spaces survive the Run key
-            let mut quoted: Vec<u16> = Vec::with_capacity(len + 3);
-            quoted.push(b'"' as u16);
-            quoted.extend_from_slice(&raw[..len]);
-            quoted.push(b'"' as u16);
-            quoted.push(0u16);
-            RegSetValueExW(
-                hkey,
-                value_name.as_ptr(),
-                0,
-                REG_SZ,
-                quoted.as_ptr() as *const u8,
-                (quoted.len() * 2) as u32,
-            );
-        } else {
-            RegDeleteValueW(hkey, value_name.as_ptr());
-        }
-        RegCloseKey(hkey);
-    }
-}
-
-pub fn is_autostart() -> bool {
-    let run_key = to_wide("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
-    let value_name = to_wide("Wraith");
-    unsafe {
-        let mut hkey: HKEY = std::ptr::null_mut();
-        if RegOpenKeyExW(HKEY_CURRENT_USER, run_key.as_ptr(), 0, KEY_QUERY_VALUE, &mut hkey) != 0 {
-            return false;
-        }
-        let mut kind = 0u32;
-        let mut size = 0u32;
-        let found = RegQueryValueExW(
-            hkey,
-            value_name.as_ptr(),
-            std::ptr::null_mut(),
-            &mut kind,
-            std::ptr::null_mut(),
-            &mut size,
-        ) == 0;
-        RegCloseKey(hkey);
-        found
-    }
+pub fn toggle() {
+    if LOCKED.load(Relaxed) { unlock(); } else { lock(); }
 }
 
 pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -122,9 +54,9 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         WM_TRAY_MSG => {
             let event = (lp as u32) & 0xFFFF;
             if event == WM_RBUTTONUP || event == WM_CONTEXTMENU {
-                tray_from_hwnd(hwnd).show_menu(hwnd);
+                tray().show_menu(hwnd);
             } else if event == WM_LBUTTONDBLCLK {
-                toggle(hwnd);
+                toggle();
             }
             0
         }
@@ -132,11 +64,12 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         WM_COMMAND => {
             let id = wp & 0xFFFF;
             if id == ID_LOCK {
-                lock(hwnd);
+                lock();
             } else if id == ID_UNLOCK {
-                unlock(hwnd);
+                unlock();
             } else if id == ID_AUTOSTART {
-                set_autostart(!is_autostart());
+                if crate::autostart::is_enabled() { crate::autostart::disable(); }
+                else { crate::autostart::enable(); }
             } else if id == ID_EXIT {
                 DestroyWindow(hwnd);
             }
@@ -145,7 +78,9 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
 
         WM_TIMER => {
             if wp == TIMER_PANIC && LOCKED.load(Relaxed) && hooks::panic_key_tick() {
-                unlock(hwnd);
+                unlock();
+            } else if wp == TIMER_WATCHDOG {
+                hooks::watchdog();
             }
             0
         }
@@ -153,18 +88,16 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         WM_UPDATE_RESULT => {
             if lp != 0 {
                 let s = Box::from_raw(lp as *mut String);
-                tray_from_hwnd(hwnd).show_balloon("Wraith Update", &s);
+                tray().show_balloon("Wraith Update", &s);
             }
             0
         }
 
         WM_DESTROY => {
             hooks::uninstall();
-            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut TrayIcon;
+            let ptr = APP_TRAY.swap(0, Relaxed) as *mut TrayIcon;
             if !ptr.is_null() {
-                (*ptr).destroy();
-                drop(Box::from_raw(ptr));
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                drop(Box::from_raw(ptr)); // Drop impl handles NIM_DELETE
             }
             PostQuitMessage(0);
             0
@@ -173,7 +106,7 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         _ => {
             let tc = crate::TASKBAR_CREATED.load(Relaxed);
             if tc != 0 && msg == tc {
-                tray_from_hwnd(hwnd).re_add();
+                tray().re_add();
                 return 0;
             }
             DefWindowProcW(hwnd, msg, wp, lp)
@@ -181,10 +114,7 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
     }
 }
 
-unsafe fn tray_from_hwnd(hwnd: HWND) -> &'static mut TrayIcon {
-    &mut *(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut TrayIcon)
+fn tray() -> &'static mut TrayIcon {
+    unsafe { &mut *(APP_TRAY.load(Relaxed) as *mut TrayIcon) }
 }
 
-fn to_wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}

@@ -25,14 +25,14 @@ fn wide(s: &str) -> Vec<u16> {
 /// Parse the `tag_name` value from a GitHub releases JSON response.
 /// Returns the raw tag string (e.g. `"v1.2.3"`) including the leading `v`.
 fn parse_tag(body: &str) -> Option<&str> {
-    let after = body.split("\"tag_name\"").nth(1)?;
-    let after_colon = after.splitn(2, ':').nth(1)?;
+    let after = body.split_once("\"tag_name\"")?.1;
+    let after_colon = after.split_once(':')?.1;
     let trimmed = after_colon.trim_start();
     if !trimmed.starts_with('"') {
         return None;
     }
     let inner = &trimmed[1..];
-    Some(inner.split('"').next()?)
+    inner.split('"').next()
 }
 
 /// Parse a version string (`"1.2.3"` or `"v1.2.3"`) into a comparable tuple.

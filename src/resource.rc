@@ -2,14 +2,10 @@
 // Compile: x86_64-w64-mingw32-windres src/resource.rc -o <OUT_DIR>/resource.o
 // (build.rs does this automatically when target_os = windows)
 
-// Icon IDs -- add wraith_unlocked.ico and wraith_locked.ico to repo root,
-// then uncomment these two lines and rebuild:
-// 1 ICON "../wraith_unlocked.ico"
-// 2 ICON "../wraith_locked.ico"
+1 ICON "../assets/unlocked-white.ico"
+2 ICON "../assets/locked-white.ico"
 
 // Application manifest -- embedded as RT_MANIFEST (ID 1)
-// windres runs with --include-dir=. (project root), so "../wraith.manifest"
-// resolves relative to this file's directory (src/).
 1 RT_MANIFEST "../wraith.manifest"
 
 // Version information block (raw numeric values -- no #include <windows.h> needed)

@@ -1,8 +1,8 @@
 fn main() {
     println!("cargo:rerun-if-changed=src/resource.rc");
     println!("cargo:rerun-if-changed=wraith.manifest");
-    println!("cargo:rerun-if-changed=assets/wraith_unlocked.ico");
-    println!("cargo:rerun-if-changed=assets/wraith_locked.ico");
+    println!("cargo:rerun-if-changed=assets/unlocked-white.ico");
+    println!("cargo:rerun-if-changed=assets/locked-white.ico");
     println!("cargo:rustc-link-lib=winhttp");
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {

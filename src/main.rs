@@ -1,8 +1,10 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
 mod app;
+mod autostart;
 mod config;
 mod hooks;
+mod lock_policy;
 mod tray;
 mod updater;
 
@@ -15,9 +17,8 @@ use windows_sys::Win32::{
     },
     UI::WindowsAndMessaging::{
         CreateWindowExW, DispatchMessageW, GetMessageW, MessageBoxW, RegisterClassExW,
-        RegisterWindowMessageW, TranslateMessage, HWND_MESSAGE, MB_ICONERROR, MB_ICONINFORMATION,
-        MB_OK, MSG,
-        WNDCLASSEXW, WM_USER,
+        RegisterWindowMessageW, SetTimer, TranslateMessage, HWND_MESSAGE, MB_ICONERROR,
+        MB_ICONINFORMATION, MB_OK, MSG, WNDCLASSEXW, WM_USER,
     },
 };
 
@@ -27,7 +28,8 @@ pub(crate) const ID_LOCK: usize = 1001;
 pub(crate) const ID_UNLOCK: usize = 1002;
 pub(crate) const ID_AUTOSTART: usize = 1003;
 pub(crate) const ID_EXIT: usize = 1004;
-pub(crate) const TIMER_PANIC: usize = 2001;
+pub(crate) const TIMER_PANIC:    usize = 2001;
+pub(crate) const TIMER_WATCHDOG: usize = 2002;
 
 pub(crate) static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
@@ -62,6 +64,11 @@ fn main() {
 
         // 2. Config -- load and cache in OnceLock
         config::Config::get();
+
+        // Startup cleanup: remove DisableTaskMgr in case Wraith crashed while locked.
+        // Hooks die with the process so input is already unblocked, but the registry
+        // key survives a crash and must be cleared before hooks are reinstalled.
+        lock_policy::remove();
 
         // 3. Register window class + create message-only window
         let hinstance = GetModuleHandleW(std::ptr::null());
@@ -118,14 +125,10 @@ fn main() {
             Relaxed,
         );
 
-        // 5. Create tray icon, store pointer in GWLP_USERDATA
-        let tray = Box::new(tray::TrayIcon::new(hwnd));
-        windows_sys::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(
-            hwnd, windows_sys::Win32::UI::WindowsAndMessaging::GWLP_USERDATA,
-            Box::into_raw(tray) as isize,
-        );
+        // 5. Create tray icon, store pointer in APP_TRAY
+        hooks::APP_TRAY.store(Box::into_raw(Box::new(tray::TrayIcon::new(hwnd))) as usize, Relaxed);
 
-        // 6. Install low-level hooks (also stores APP_HWND) -- exit on failure
+        // 6. Install low-level hooks (also stores APP_HWND) — exit on failure
         if let Err(e) = hooks::install(hwnd) {
             MessageBoxW(
                 std::ptr::null_mut(),
@@ -138,11 +141,15 @@ fn main() {
 
         // 7. Lock on start if configured
         if config::Config::get().lock_on_start {
-            app::lock(hwnd);
+            app::lock();
         }
 
         // 8. Spawn update checker (background thread)
         updater::spawn(hwnd);
+
+        // 9. Watchdog: reinstall hooks every 5s to recover from silent removal
+        //    (e.g. after Parsec virtual driver teardown mutates the hook chain)
+        SetTimer(hwnd, TIMER_WATCHDOG, 5000, None);
 
         // 9. Message pump -- drives WH_KEYBOARD_LL / WH_MOUSE_LL callbacks
         let mut msg: MSG = std::mem::zeroed();
