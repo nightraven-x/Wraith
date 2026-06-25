@@ -500,4 +500,4 @@ Single-context repo. Domain glossary: `CONTEXT.md` at repo root. Architecture de
 
 ---
 
-*Built by shadow-dragon-2002. MIT license. https://github.com/shadow-dragon-2002/Wraith*
+*Built by shadow-dragon-2002. PolyForm Noncommercial 1.0.0. https://github.com/shadow-dragon-2002/Wraith*

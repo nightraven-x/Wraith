@@ -5,7 +5,7 @@ edition     = "2021"
 authors     = ["shadow-dragon-2002"]
 description = "Physical input blocker — passes synthetic AI input, blocks hardware"
 repository  = "https://github.com/shadow-dragon-2002/Wraith"
-license     = "MIT"
+license-file = "LICENSE"
 
 [[bin]]
 name = "wraith"

@@ -125,7 +125,7 @@ wraith/
 │       └── build.yml  ← GitHub Actions CI/CD (ubuntu + MinGW cross-compile)
 ├── Cargo.toml
 ├── wraith.ini         ← default config (shipped with .exe)
-└── LICENSE            ← MIT
+└── LICENSE            ← PolyForm Noncommercial 1.0.0
 ```
 
 ---
@@ -149,4 +149,4 @@ wraith/
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+[PolyForm Noncommercial 1.0.0](LICENSE) — free to use, modify, and share for non-commercial purposes. Commercial use prohibited.
