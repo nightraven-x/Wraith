@@ -14,6 +14,8 @@ Wraith installs two low-level Windows hooks — `WH_KEYBOARD_LL` and `WH_MOUSE_L
 
 That's the whole mechanism. No kernel driver, no virtual device, no registry tricks for the main blocking logic. The binary is around 50KB.
 
+**What Wraith protects against:** a person sitting down at the keyboard. **What it doesn't:** software already running on the machine. Any process that calls `SendInput()` sets the injected flag and passes straight through — that's the intended behavior, since that's how your AI agent sends input. On a clean machine running only software you trust, that's the right trade-off.
+
 There's one thing you can't block from user mode: `Ctrl+Alt+Del`. Microsoft hardwired that into the kernel as the Secure Attention Sequence and no application can intercept it. Everything else is fair game.
 
 ---
@@ -31,6 +33,14 @@ One thing worth knowing: input from Parsec, RDP, and VNC is also tagged as injec
 **Portable:** Download `wraith.exe` and `wraith.ini` and put them in the same folder. Run it — Windows will ask for administrator access, which is required for the hooks to work reliably.
 
 Once running, Wraith sits in the system tray. Right-click for the menu, double-click to toggle lock state.
+
+---
+
+## First run — SmartScreen warning
+
+Windows will show a SmartScreen warning the first time you run the `.exe` or installer: *"Windows protected your PC"*. This happens because the binary is unsigned (code-signing certificates cost money and Wraith is a free personal-use tool).
+
+To proceed: click **More info**, then **Run anyway**. You're running a ~50KB Rust binary with no network access beyond the GitHub release check. Source is [here](https://github.com/shadow-dragon-2002/Wraith) if you want to audit or build it yourself.
 
 ---
 
@@ -98,7 +108,7 @@ If you want to embed custom icons, drop your `.ico` files into `assets/` and upd
 
 ## Why not BlockInput?
 
-`BlockInput()` is the obvious Windows API for this. The problem is it blocks everything — physical and synthetic alike. Your AI agent would also be locked out. Wraith specifically checks the injected flag so synthetic input passes through and only physical hardware gets blocked. As far as I can tell, no other open-source tool does this as a ready-made utility.
+`BlockInput()` is the obvious Windows API for this. The problem is it blocks everything — physical and synthetic alike. Your AI agent would also be locked out. Wraith specifically checks the injected flag so synthetic input passes through and only physical hardware gets blocked. The injected-flag technique uses documented Windows APIs (`LLKHF_INJECTED` / `LLMHF_INJECTED`) but hasn't been packaged as a ready-made lock utility before.
 
 ---
 
