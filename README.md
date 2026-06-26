@@ -107,12 +107,11 @@ If you want to embed custom icons, drop your `.ico` files into `assets/` and upd
 ```
 src/
   main.rs       startup, single-instance mutex, message loop
-  app.rs        lock/unlock, WndProc
+  app.rs        lock/unlock, WndProc, DisableTaskMgr policy
   hooks.rs      keyboard and mouse hook callbacks, global atomics
   tray.rs       system tray icon, menu, balloon notifications
   config.rs     wraith.ini loading
   autostart.rs  Windows startup registry entry
-  lock_policy.rs  DisableTaskMgr policy applied on lock
   updater.rs    background GitHub release check
 
 installer/wraith.nsi   NSIS installer script

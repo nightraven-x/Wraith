@@ -10,7 +10,8 @@
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
-        <!-- requireAdministrator ensures reliable hook installation on all windows -->
+          <!-- asInvoker: no UAC prompt. WH_KEYBOARD_LL works without elevation. -->
+        <!-- Change to requireAdministrator to prevent standard users from killing Wraith. -->
         <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
       </requestedPrivileges>
     </security>

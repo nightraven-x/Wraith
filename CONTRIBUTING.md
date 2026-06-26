@@ -123,7 +123,7 @@ Wraith creates an `HWND_MESSAGE` (message-only) window — invisible, never rend
 
 2. Config::get()            — load wraith.ini into OnceLock
 
-3. lock_policy::remove()    — crash cleanup: delete DisableTaskMgr if left by prior crash
+3. app::startup_cleanup()   — crash cleanup: delete DisableTaskMgr if left by prior crash
 
 4. RegisterClassExW + CreateWindowExW(HWND_MESSAGE) → hwnd
 
@@ -137,7 +137,7 @@ Wraith creates an `HWND_MESSAGE` (message-only) window — invisible, never rend
 
 8. if lock_on_start: app::lock()
 
-9. updater::spawn(hwnd)
+9. updater::spawn()
 
 10. SetTimer(hwnd, TIMER_WATCHDOG, 5000, None)
       └─ Reinstalls hooks every 5s to survive Parsec/RDP virtual driver teardown
@@ -216,13 +216,13 @@ Windows silently removes a hook if its callback does not return within `LowLevel
 
 ### `app.rs` — Lock/unlock logic and WndProc
 
-**Responsibilities:** `lock()`, `unlock()`, `toggle()`, `wnd_proc`.
+**Responsibilities:** `lock()`, `unlock()`, `toggle()`, `wnd_proc`, DisableTaskMgr policy (private), startup crash cleanup.
 
 **Public API:**
 
 ```rust
-pub fn lock()    // Set LOCKED=true, apply lock_policy, start panic timer, update tray
-pub fn unlock()  // Set LOCKED=false, remove lock_policy, kill panic timer, update tray
+pub fn lock()    // Set LOCKED=true, block Task Manager, start panic timer, update tray
+pub fn unlock()  // Set LOCKED=false, unblock Task Manager, kill panic timer, update tray
 pub fn toggle()  // lock() if unlocked, unlock() if locked
 
 pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT
@@ -232,7 +232,7 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
 
 1. Early-return if already locked
 2. `LOCKED.store(true, Relaxed)`
-3. `lock_policy::apply()` — set `DisableTaskMgr = 1` in registry
+3. `task_mgr_block()` — set `DisableTaskMgr = 1` in registry (private to `app.rs`)
 4. `SetTimer(hwnd, TIMER_PANIC, 100ms)` — start panic unlock poll
 5. `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)` — prevent sleep/screensaver
 6. `tray().set_locked(true)` — update tray icon + tooltip
@@ -241,7 +241,7 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
 
 1. Early-return if already unlocked
 2. `LOCKED.store(false, Relaxed)`
-3. `lock_policy::remove()` — delete `DisableTaskMgr` from registry
+3. `task_mgr_unblock()` — delete `DisableTaskMgr` from registry (private to `app.rs`)
 4. `KillTimer(hwnd, TIMER_PANIC)` — stop panic poll
 5. `hooks::panic_reset()` — clear hold timer
 6. `SetThreadExecutionState(ES_CONTINUOUS)` — restore sleep/screensaver
@@ -347,25 +347,6 @@ pub fn is_enabled() -> bool  // Query Run key for Wraith value
 **Registry key:** `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `Wraith`.
 
 **Quoted path:** The exe path is wrapped in double quotes (`"C:\Program Files\Wraith\wraith.exe"`) so paths containing spaces survive the Run key parsing.
-
----
-
-### `lock_policy.rs` — Task Manager policy
-
-**Responsibilities:** Set/clear the `DisableTaskMgr` registry policy on lock/unlock.
-
-**Public API:**
-
-```rust
-pub fn apply()   // Set DisableTaskMgr = 1 under HKCU Policies\System
-pub fn remove()  // Delete DisableTaskMgr (also called at startup for crash cleanup)
-```
-
-**Registry key:** `HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\System`, value `DisableTaskMgr`, type `REG_DWORD`, data `1`.
-
-**Why this works:** The Policies key is enforced by the Windows shell even for administrator accounts — it is self-applied policy, not admin-enforcement. From the Ctrl+Alt+Del security screen, clicking Task Manager is blocked by this policy. Remaining options on the security screen (Lock, Sign Out, Change Password, Switch User) do not bypass Wraith.
-
-**Crash safety:** If Wraith crashes while locked, the process death removes the hooks (input unblocked) but the registry key persists. On next Wraith launch, `lock_policy::remove()` is called before anything else, restoring Task Manager access.
 
 ---
 
@@ -598,7 +579,6 @@ Tests are limited to pure-logic modules with no Win32 side effects:
 
 | Test | Module | What it verifies |
 |------|--------|-----------------|
-| `defaults_match_ini_docs` | `config.rs` | Default constants match documented values |
 | `parse_tag_extracts_version` | `updater.rs` | JSON tag_name extraction |
 | `parse_tag_returns_none_on_missing` | `updater.rs` | Graceful missing-field handling |
 | `parse_ver_strips_v_prefix` | `updater.rs` | v-prefix normalisation |
@@ -701,7 +681,7 @@ Panics in `extern "system"` functions with `panic = "unwind"` produce undefined 
 
 | Limitation | Reason | Workaround |
 |------------|--------|------------|
-| `Ctrl+Alt+Del` cannot be blocked | Kernel-hardwired SAS | `lock_policy::apply()` disables Task Manager from the Ctrl+Alt+Del menu |
+| `Ctrl+Alt+Del` cannot be blocked | Kernel-hardwired SAS | `lock()` sets `DisableTaskMgr` in registry, blocking Task Manager from the Ctrl+Alt+Del menu |
 | Wraith can be terminated by any process with sufficient privilege | Windows security model | Run with `requireAdministrator` manifest; standard user accounts cannot kill admin processes |
 | Hook silently removed if callback exceeds `LowLevelHooksTimeout` | Windows enforcement | Callbacks are O(1); 5s watchdog timer reinstalls hooks if removed |
 | `WM_ENDSESSION` not received by message-only windows | HWND_MESSAGE limitation | OS reclaims hooks and tray on process exit — no action needed |
@@ -771,7 +751,7 @@ makensis installer\wraith.nsi
 
 1. Check `docs/adr/` — ensure your approach doesn't contradict an existing decision
 2. If introducing new global state: add it to `hooks.rs` as an `AtomicUsize` or `AtomicBool`
-3. If adding Win32 registry operations: consider adding them to `autostart.rs` (Run key) or `lock_policy.rs` (Policies key) rather than a new module unless the concern is genuinely distinct
+3. If adding Win32 registry operations: consider adding them to `autostart.rs` (Run key) or `app.rs` (lock side effects) rather than a new module unless the concern is genuinely distinct
 4. If adding a new WM_* message: define the constant in `main.rs`, handle it in `wnd_proc` in `app.rs`
 5. Test any pure logic (parsing, calculations) in a `#[cfg(test)]` module. Document absent seams explicitly
 
