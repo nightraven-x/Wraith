@@ -1,0 +1,43 @@
+name: Feature Request
+description: Propose a new feature within Wraith's core — block physical input, pass synthetic input.
+labels: ["needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Wraith's scope: blocking physical input while passing synthetic/injected input. Features outside this core are unlikely to be accepted.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the gap in current behaviour.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How would you like it to work?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows
+        - Linux (X11)
+        - Both
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you thought about.
+    validations:
+      required: false

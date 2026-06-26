@@ -1,0 +1,51 @@
+name: Bug Report
+description: Something is broken or behaving unexpectedly.
+labels: ["needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: confirm you are on the latest release and have read the [known limitations](../../CONTRIBUTING.md#9-known-limitations).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug. What did you expect vs what did you see?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Lock Wraith with Ctrl+Shift+Alt+L
+        2. Press any physical key
+        3. ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Wraith version
+      placeholder: "1.0.0"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS / display server
+      placeholder: "Windows 11 23H2 / Linux X11"
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Hook timeout? Specific app? Remote session?
+    validations:
+      required: false
