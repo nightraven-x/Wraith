@@ -7,6 +7,12 @@
 !include "x64.nsh"
 
 ; -- Metadata ---------------------------------------------------------------
+; VERSION is passed via: makensis /DVERSION=1.2.3 installer\wraith.nsi
+; Falls back to "dev" if not provided (local builds).
+!ifndef VERSION
+  !define VERSION "dev"
+!endif
+
 Name              "Wraith"
 OutFile           "wraith-setup.exe"
 InstallDir        "$PROGRAMFILES64\Wraith"
@@ -52,7 +58,7 @@ Section "Wraith" SecMain
     WriteRegStr   HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Wraith" \
                        "DisplayName"     "Wraith"
     WriteRegStr   HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Wraith" \
-                       "DisplayVersion"  "1.0.0"
+                       "DisplayVersion"  "${VERSION}"
     WriteRegStr   HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Wraith" \
                        "Publisher"       "shadow-dragon-2002"
     WriteRegStr   HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Wraith" \

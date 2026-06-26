@@ -92,7 +92,11 @@ jobs:
           name: wraith-windows-x64
 
       - name: Build NSIS installer
-        run: makensis installer\wraith.nsi
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set "VER=%TAG:v=%"
+          makensis /DVERSION=%VER% installer\wraith.nsi
         shell: cmd
         continue-on-error: true
 
