@@ -85,6 +85,9 @@ Section "Uninstall"
     ; Remove auto-start entry if it was set
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Wraith"
 
+    ; Clear DisableTaskMgr in case Wraith was locked when uninstalled
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Policies\System" "DisableTaskMgr"
+
     ; Remove uninstall entry and app registry key
     DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Wraith"
     DeleteRegKey HKCU "Software\Wraith"
