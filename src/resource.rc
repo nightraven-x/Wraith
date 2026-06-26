@@ -26,7 +26,7 @@ BEGIN
             VALUE "FileDescription",  "Wraith - Physical Input Blocker"
             VALUE "FileVersion",      "1.0.0"
             VALUE "InternalName",     "wraith"
-            VALUE "LegalCopyright",   "PolyForm Noncommercial 1.0.0"
+            VALUE "LegalCopyright",   "GNU General Public License v3.0"
             VALUE "OriginalFilename", "wraith.exe"
             VALUE "ProductName",      "Wraith"
             VALUE "ProductVersion",   "1.0.0"

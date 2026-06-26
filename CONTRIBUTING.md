@@ -785,4 +785,4 @@ Any code called from `keyboard_proc` or `mouse_proc` must follow these rules:
 
 ---
 
-*Wraith — PolyForm Noncommercial 1.0.0 — https://github.com/shadow-dragon-2002/Wraith*
+*Wraith — GNU GPL v3.0 — https://github.com/shadow-dragon-2002/Wraith*
