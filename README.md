@@ -1,8 +1,16 @@
-# Wraith
+# Wraith — Windows Physical Input Blocker for AI Automation
 
-You're running an AI agent on your machine — Claude doing computer use, an AutoHotkey script, whatever — and you need to step away. The problem is that anyone who sits down at your desk can just grab the keyboard and mouse and start interfering. You don't want to close the AI session, you just want the physical inputs to go dead until you get back.
+You're running an AI agent on your machine — Claude computer-use, an AutoHotkey script, a PyAutoGUI bot, whatever — and you need to step away. The problem is that anyone who sits down at your desk can just grab the keyboard and mouse and start interfering. You don't want to close the AI session, you just want the physical inputs to go dead until you get back.
 
 That's what Wraith does. Lock it from the system tray and the keyboard and mouse stop responding to physical input. The AI keeps typing, clicking, scrolling — it doesn't notice anything changed. Unlock it when you're back.
+
+**Works with:** Claude computer-use, OpenAI Operator, AutoHotkey, PyAutoGUI, Sikuli, Parsec, RDP, and any tool that sends input via `SendInput()`.
+
+**Use cases:**
+- Block physical keyboard and mouse input on Windows while an AI agent runs unattended
+- Prevent desk interference during overnight Claude or GPT computer-use sessions
+- Lock a shared workstation while automation runs in the foreground
+- Any scenario needing Windows input blocking that preserves synthetic/injected input
 
 ---
 
