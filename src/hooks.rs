@@ -15,6 +15,16 @@ pub static LOCKED:   AtomicBool  = AtomicBool::new(false);
 pub static APP_HWND: AtomicUsize = AtomicUsize::new(0); // HWND as usize
 pub static APP_TRAY: AtomicUsize = AtomicUsize::new(0); // *mut TrayIcon as usize
 
+// Set by settings::show() for as long as the settings dialog is open. Without
+// this, the low-level hook keeps matching the CURRENTLY ACTIVE combo while
+// the user is physically pressing it to record a NEW value for that same
+// field -- firing a real lock/unlock mid-edit. If Wraith was already LOCKED
+// when the dialog opened, physical input to the dialog's own controls would
+// also stay blocked, with no way to even click Cancel. Bypassing the hook
+// entirely while the dialog is open avoids both: same treatment as injected
+// input, checked right after that flag.
+pub static SETTINGS_OPEN: AtomicBool = AtomicBool::new(false);
+
 static KB_HOOK:     AtomicUsize = AtomicUsize::new(0); // HHOOK as usize
 static MOUSE_HOOK:  AtomicUsize = AtomicUsize::new(0); // HHOOK as usize
 static PANIC_START: AtomicU32   = AtomicU32::new(0);   // GetTickCount() snapshot
@@ -142,6 +152,11 @@ unsafe extern "system" fn keyboard_proc(n_code: i32, w_param: WPARAM, l_param: L
         return CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param);
     }
 
+    // Settings dialog is open — see SETTINGS_OPEN's doc comment.
+    if SETTINGS_OPEN.load(Relaxed) {
+        return CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param);
+    }
+
     let is_down = w_param == WM_KEYDOWN as WPARAM || w_param == WM_SYSKEYDOWN as WPARAM;
     let is_up = w_param == WM_KEYUP as WPARAM || w_param == WM_SYSKEYUP as WPARAM;
 
@@ -190,6 +205,11 @@ unsafe extern "system" fn mouse_proc(n_code: i32, w_param: WPARAM, l_param: LPAR
 
     // LLMHF_INJECTED (bit 0) — synthetic input; always pass through.
     if ms.flags & 0x01 != 0 {
+        return CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param);
+    }
+
+    // Settings dialog is open — see SETTINGS_OPEN's doc comment.
+    if SETTINGS_OPEN.load(Relaxed) {
         return CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param);
     }
 

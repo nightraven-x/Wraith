@@ -14,11 +14,11 @@
 
 use std::sync::atomic::Ordering::Relaxed;
 use windows_sys::Win32::{
-    Foundation::{BOOL, HWND, LPARAM, WPARAM},
+    Foundation::{HWND, LPARAM, WPARAM},
     System::LibraryLoader::GetModuleHandleW,
     UI::Controls::{CheckDlgButton, IsDlgButtonChecked, BST_CHECKED, BST_UNCHECKED},
     UI::WindowsAndMessaging::{
-        DialogBoxParamW, EndDialog, GetDlgItem, GetDlgItemInt, SetDlgItemInt, SetDlgItemTextW,
+        DialogBoxParamW, EndDialog, GetDlgItem, SetDlgItemTextW,
         IDCANCEL, IDOK, WM_CLOSE, WM_COMMAND, WM_INITDIALOG,
     },
 };
@@ -45,10 +45,33 @@ const ERR_PANIC_RANGE: &str = "Panic key must be a VK code between 1 and 255.";
 #[cfg(test)]
 static TEST_HWND: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+// RAII guard: SETTINGS_OPEN must come back down even if something above
+// EndDialog on the call stack unwinds unexpectedly -- Drop runs regardless.
+struct SettingsOpenGuard;
+impl SettingsOpenGuard {
+    fn new() -> Self {
+        crate::hooks::SETTINGS_OPEN.store(true, Relaxed);
+        Self
+    }
+}
+impl Drop for SettingsOpenGuard {
+    fn drop(&mut self) {
+        crate::hooks::SETTINGS_OPEN.store(false, Relaxed);
+    }
+}
+
 /// Open the settings dialog modally. Blocks the caller (main thread) until
 /// the user closes it via OK or Cancel; the dialog pumps its own messages
 /// in the meantime, so this is safe to call from wnd_proc.
+///
+/// While open, the low-level hooks are fully bypassed (SETTINGS_OPEN) --
+/// otherwise the hook would match the CURRENTLY ACTIVE combo while the user
+/// is physically pressing it to record a new value for that same field,
+/// firing a real lock/unlock mid-edit; and if Wraith was already locked when
+/// the dialog opened, its own controls would be unreachable via physical
+/// input, with no way to even click Cancel.
 pub fn show(hwnd: HWND) {
+    let _guard = SettingsOpenGuard::new();
     unsafe {
         let hinstance = GetModuleHandleW(std::ptr::null());
         DialogBoxParamW(
@@ -70,7 +93,12 @@ unsafe extern "system" fn dlg_proc(hwnd: HWND, msg: u32, wp: WPARAM, _lp: LPARAM
     match msg {
         WM_INITDIALOG => {
             let cfg = Config::get();
-            SetDlgItemInt(hwnd, IDC_PANIC_VK, cfg.panic_vk.load(Relaxed), 0);
+
+            // No modifier requirement for panic key -- it's single-key by
+            // design (checked via a hold-timer in hooks.rs, not decide_action)
+            // -- so seed the recorder with mods=0.
+            let panic_edit = GetDlgItem(hwnd, IDC_PANIC_VK);
+            hotkey_recorder::install(panic_edit, (0, cfg.panic_vk.load(Relaxed)));
 
             let lock_edit = GetDlgItem(hwnd, IDC_LOCK_COMBO);
             hotkey_recorder::install(
@@ -103,12 +131,15 @@ unsafe extern "system" fn dlg_proc(hwnd: HWND, msg: u32, wp: WPARAM, _lp: LPARAM
         WM_COMMAND => {
             let id = (wp & 0xFFFF) as i32;
             if id == IDOK {
-                let mut translated: BOOL = 0;
-                let panic_val = GetDlgItemInt(hwnd, IDC_PANIC_VK, &mut translated, 0);
+                let panic_edit = GetDlgItem(hwnd, IDC_PANIC_VK);
+                let (_, panic_val) = hotkey_recorder::value(panic_edit);
                 // VK code 0 is Win32's reserved "no key" value, never generated
-                // by real hardware -- accepting it here would silently make the
-                // panic-unlock failsafe permanently unreachable.
-                let panic_ok = translated != 0 && panic_val >= 1 && panic_val <= 255;
+                // by real hardware -- it's what an untouched/failed capture
+                // reads as, and accepting it would silently make the
+                // panic-unlock failsafe permanently unreachable. Any modifier
+                // held while pressing the panic key is ignored -- hooks.rs's
+                // hold-timer checks vkCode alone, not held modifiers.
+                let panic_ok = panic_val >= 1 && panic_val <= 255;
 
                 let lock_edit = GetDlgItem(hwnd, IDC_LOCK_COMBO);
                 let unlock_edit = GetDlgItem(hwnd, IDC_UNLOCK_COMBO);
@@ -165,8 +196,8 @@ unsafe extern "system" fn dlg_proc(hwnd: HWND, msg: u32, wp: WPARAM, _lp: LPARAM
 // Behaviors 4 & 5: drive the real modal dialog end-to-end. DialogBoxParamW
 // blocks the calling thread pumping its own message queue, so it runs on a
 // background thread here while the test thread drives it via real Win32
-// messages (SetDlgItemInt + a real BM_CLICK on the OK/Cancel button) — no
-// mocks, the same DlgProc production code runs both paths.
+// messages (real SendInput keypresses + a real BM_CLICK on the OK/Cancel
+// button) — no mocks, the same DlgProc production code runs both paths.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,6 +293,7 @@ mod tests {
     const VK_L: u16 = 0x4C;
     const VK_U: u16 = 0x55;
     const VK_A: u16 = 0x41;
+    const VK_C: u16 = 0x43;
 
     // Moves real keyboard focus onto one of the dialog's combo EDIT controls
     // via WM_NEXTDLGCTL (sent, not posted, so it's processed on the dialog's
@@ -332,12 +364,14 @@ mod tests {
         let t = std::thread::spawn(|| show(std::ptr::null_mut()));
         let hwnd = wait_for_test_hwnd();
 
-        unsafe { SetDlgItemInt(hwnd, IDC_PANIC_VK, 99, 0) };
+        // Panic field is now hotkey_recorder-backed -- record a real keypress
+        // rather than writing digits into a numeric field that no longer exists.
+        type_combo(hwnd, IDC_PANIC_VK, &[], VK_C);
         click(hwnd, IDOK);
         t.join().unwrap();
 
-        assert_eq!(Config::get().panic_vk.load(Relaxed), 99);
-        assert_eq!(read_panic_key_from_ini(), 99);
+        assert_eq!(Config::get().panic_vk.load(Relaxed), VK_C as u32);
+        assert_eq!(read_panic_key_from_ini(), VK_C as i32);
 
         Config::get().panic_vk.store(27, Relaxed);
         Config::get().write_back();
@@ -356,7 +390,7 @@ mod tests {
         let hwnd = wait_for_test_hwnd();
 
         // Edit the field but cancel — neither the atomic nor the ini should move.
-        unsafe { SetDlgItemInt(hwnd, IDC_PANIC_VK, 250, 0) };
+        type_combo(hwnd, IDC_PANIC_VK, &[], VK_C);
         click(hwnd, IDCANCEL);
         t.join().unwrap();
 
@@ -364,57 +398,60 @@ mod tests {
         assert_eq!(read_panic_key_from_ini(), 27);
     }
 
+    // The panic field's old numeric-entry incarnation could hold an arbitrary
+    // typed number (e.g. 999, out of VK range). Now that it's hotkey_recorder
+    // -backed, no real keypress can ever produce a VK outside the codespace a
+    // key event actually carries -- there's no way to "type" an invalid value
+    // through this UI anymore. The validation still matters for a value that
+    // was never a real keypress at all: a pre-existing bad seed (e.g. a
+    // hand-edited wraith.ini with a garbage PanicKey) that the user doesn't
+    // happen to fix before clicking OK. These two tests simulate that seed
+    // directly rather than typing it, since typing it is no longer possible.
     #[test]
-    fn invalid_value_rejected_dialog_stays_open() {
+    fn out_of_range_panic_key_seed_rejected_dialog_stays_open() {
         let _g = crate::config::CONFIG_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
 
-        Config::get().panic_vk.store(27, Relaxed);
-        Config::get().write_back();
+        Config::get().panic_vk.store(999, Relaxed);
 
         let t = std::thread::spawn(|| show(std::ptr::null_mut()));
         let hwnd = wait_for_test_hwnd();
 
-        // 999 is out of the plausible VK range (0-255) -- OK must reject it
-        // and keep the dialog open rather than accept/clamp/silently correct it.
-        unsafe { SetDlgItemInt(hwnd, IDC_PANIC_VK, 999, 0) };
+        // Don't touch the panic field -- OK must reject the seeded value
+        // rather than silently accept or clamp it.
         click(hwnd, IDOK);
-
-        // Config must be untouched by the rejected attempt.
-        assert_eq!(Config::get().panic_vk.load(Relaxed), 27);
-        assert_eq!(read_panic_key_from_ini(), 27);
 
         // Dialog is still up -- close it via Cancel so the thread can join.
+        // (If OK had wrongly succeeded, EndDialog would already have run and
+        // this GetDlgItem/click would panic on a dead window.)
         click(hwnd, IDCANCEL);
         t.join().unwrap();
+
+        Config::get().panic_vk.store(27, Relaxed);
+        Config::get().write_back();
     }
 
     #[test]
-    fn zero_panic_key_rejected_dialog_stays_open() {
+    fn zero_panic_key_seed_rejected_dialog_stays_open() {
         let _g = crate::config::CONFIG_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
 
-        Config::get().panic_vk.store(27, Relaxed);
-        Config::get().write_back();
+        // VK code 0 is Win32's reserved "no key" value -- never generated by
+        // real hardware, so it can only ever reach here as a pre-existing
+        // seed, never a real keypress.
+        Config::get().panic_vk.store(0, Relaxed);
 
         let t = std::thread::spawn(|| show(std::ptr::null_mut()));
         let hwnd = wait_for_test_hwnd();
 
-        // VK code 0 is Win32's reserved "no key" value -- never generated by
-        // real hardware. It parses as a valid, in-range u32, so the old
-        // `translated != 0 && panic_val <= 255` check accepted it, silently
-        // making the panic-unlock failsafe permanently unreachable. OK must
-        // reject it and keep the dialog open, same as the 999-out-of-range case.
-        unsafe { SetDlgItemInt(hwnd, IDC_PANIC_VK, 0, 0) };
         click(hwnd, IDOK);
-
-        assert_eq!(Config::get().panic_vk.load(Relaxed), 27);
-        assert_eq!(read_panic_key_from_ini(), 27);
-
         click(hwnd, IDCANCEL);
         t.join().unwrap();
+
+        Config::get().panic_vk.store(27, Relaxed);
+        Config::get().write_back();
     }
 
     #[test]
@@ -550,7 +587,7 @@ mod tests {
         let t = std::thread::spawn(|| show(std::ptr::null_mut()));
         let hwnd = wait_for_test_hwnd();
 
-        unsafe { SetDlgItemInt(hwnd, IDC_PANIC_VK, 200, 0) };
+        type_combo(hwnd, IDC_PANIC_VK, &[], VK_C);
         type_combo(hwnd, IDC_LOCK_COMBO, &[VK_CONTROL, VK_SHIFT], VK_L);
         type_combo(hwnd, IDC_UNLOCK_COMBO, &[VK_CONTROL, VK_SHIFT], VK_U);
         click(hwnd, IDCANCEL);
@@ -619,15 +656,19 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         set_baseline_config(); // lock_on_start = false
+        // Panic field is hotkey_recorder-backed now -- no real keypress can
+        // produce an out-of-range VK, so simulate a pre-existing bad seed
+        // (e.g. a hand-edited wraith.ini) instead of typing one.
+        Config::get().panic_vk.store(999, Relaxed);
 
         let t = std::thread::spawn(|| show(std::ptr::null_mut()));
         let hwnd = wait_for_test_hwnd();
 
-        // Toggle the checkbox, but also push panic key out of range so the
-        // whole commit must be rejected -- proving lock_on_start can't sneak
-        // through as a side commit independent of the other fields' validation.
+        // Toggle the checkbox, but leave the out-of-range panic key seed
+        // untouched, so the whole commit must be rejected -- proving
+        // lock_on_start can't sneak through as a side commit independent of
+        // the other fields' validation.
         unsafe { CheckDlgButton(hwnd, IDC_LOCK_ON_START, BST_CHECKED) };
-        unsafe { SetDlgItemInt(hwnd, IDC_PANIC_VK, 999, 0) };
         click(hwnd, IDOK);
 
         assert!(!Config::get().lock_on_start.load(Relaxed));
@@ -636,6 +677,9 @@ mod tests {
         // Dialog is still up -- close it via Cancel so the thread can join.
         click(hwnd, IDCANCEL);
         t.join().unwrap();
+
+        Config::get().panic_vk.store(27, Relaxed); // restore sane baseline
+        Config::get().write_back();
     }
 
     #[test]
