@@ -1,5 +1,9 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use std::sync::OnceLock;
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateDirectoryW, GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
+};
+use windows_sys::Win32::System::Environment::GetEnvironmentVariableW;
 use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW;
 use windows_sys::Win32::System::WindowsProgramming::{
     GetPrivateProfileIntW, WritePrivateProfileStringW,
@@ -32,7 +36,7 @@ pub struct Config {
 
 impl Config {
     pub fn load() -> Self {
-        let ini = exe_relative("wraith.ini");
+        let ini = ini_path();
         let sec = crate::to_wide("Wraith");
 
         macro_rules! get_int {
@@ -63,7 +67,7 @@ impl Config {
     /// section — everything else in the file (comments, other keys/sections)
     /// is left untouched.
     pub fn write_back(&self) {
-        let ini = exe_relative("wraith.ini");
+        let ini = ini_path();
         let sec = crate::to_wide("Wraith");
 
         macro_rules! set_int {
@@ -100,20 +104,97 @@ pub(crate) fn exe_relative(filename: &str) -> Vec<u16> {
     path
 }
 
-// Every test below touches the process-wide Config::get() singleton and/or
-// the real wraith.ini next to the test binary. cargo test runs #[test] fns
-// in parallel threads by default, so without serialization these would race
-// each other. This lock is test-only — it has nothing to do with the
-// lock-free atomics the hook path reads (ADR 0003 still holds for those).
+fn file_exists(wide_path: &[u16]) -> bool {
+    unsafe { GetFileAttributesW(wide_path.as_ptr()) != INVALID_FILE_ATTRIBUTES }
+}
+
+// Resolves wraith.ini's actual location. Prefers a file already sitting next
+// to the exe (portable mode — preserves the original behavior for anyone
+// relying on carrying an exe+ini folder around), otherwise falls back to the
+// per-user-writable %LOCALAPPDATA%\Wraith\wraith.ini. Installed apps commonly
+// land in Program Files, which a non-elevated process (asInvoker, see
+// wraith.manifest) cannot write to — without this fallback, Settings-dialog
+// changes on an installed copy would take effect immediately in memory but
+// silently fail to survive a restart.
+pub(crate) fn ini_path() -> Vec<u16> {
+    let portable = exe_relative("wraith.ini");
+    if file_exists(&portable) {
+        return portable;
+    }
+    appdata_ini_path()
+}
+
+fn appdata_ini_path() -> Vec<u16> {
+    let var = crate::to_wide("LOCALAPPDATA");
+    let mut buf = [0u16; 480];
+    let len = unsafe { GetEnvironmentVariableW(var.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) } as usize;
+    let local_appdata = String::from_utf16_lossy(&buf[..len]);
+
+    let dir = format!("{local_appdata}\\Wraith");
+    unsafe { CreateDirectoryW(crate::to_wide(&dir).as_ptr(), std::ptr::null()) }; // ERROR_ALREADY_EXISTS is fine; ignored either way
+
+    crate::to_wide(&format!("{dir}\\wraith.ini"))
+}
+
+// Every test below (and in settings.rs) touches the process-wide Config::get()
+// singleton and/or the real wraith.ini next to the test binary. cargo test
+// runs #[test] fns in parallel threads by default, so without serialization
+// these would race each other. This lock is test-only — it has nothing to do
+// with the lock-free atomics the hook path reads (ADR 0003 still holds for
+// those).
 #[cfg(test)]
 pub(crate) static CONFIG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+fn wide_to_path(wide: &[u16]) -> String {
+    let end = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
+    String::from_utf16(&wide[..end]).expect("valid utf-16 path")
+}
+
+// The single entry point every config/settings test should use to acquire
+// CONFIG_TEST_LOCK — not the static directly. Also ensures a portable ini
+// exists at the moment of acquisition: ini_path() never creates the portable
+// file itself (only checks for it), so without this, "does portable exist"
+// would depend on which test happens to run first on a fresh target/
+// directory, silently redirecting THAT test's write_back() into AppData
+// instead, with nothing to clean it up afterward. A test that deliberately
+// deletes the portable file to exercise the AppData branch must restore it
+// before this same lock releases (see settings.rs's/this file's
+// RestorePortableIniOnDrop guards, declared after this lock so they drop
+// first).
+#[cfg(test)]
+pub(crate) fn lock_config_test() -> std::sync::MutexGuard<'static, ()> {
+    let g = CONFIG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let portable = wide_to_path(&exe_relative("wraith.ini"));
+    if !std::path::Path::new(&portable).exists() {
+        let _ = std::fs::write(&portable, "[Wraith]\r\n");
+    }
+    g
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn lock() -> std::sync::MutexGuard<'static, ()> {
-        CONFIG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        super::lock_config_test()
+    }
+
+    // RAII: restores a minimal, valid portable ini on drop (including during
+    // an unwind from a failed assertion). Any test that deletes the portable
+    // candidate to force ini_path() down the AppData branch MUST hold one of
+    // these -- otherwise "portable missing" bleeds into whichever test runs
+    // next (in this process, or even a future `cargo test` invocation, since
+    // it's real disk state), silently redirecting THAT test's writes into
+    // AppData too and leaving stale, contaminating leftovers there. Declared
+    // after the CONFIG_TEST_LOCK guard in every test that uses it, so it
+    // drops (and restores) first, before the lock is released.
+    struct RestorePortableIniOnDrop;
+    impl Drop for RestorePortableIniOnDrop {
+        fn drop(&mut self) {
+            let portable = wide_to_path(&exe_relative("wraith.ini"));
+            let _ = std::fs::write(&portable, "[Wraith]\r\n");
+        }
     }
 
     // Behavior 1: the AtomicU32 conversion didn't change Config's shape in any
@@ -144,6 +225,7 @@ mod tests {
     #[test]
     fn write_back_preserves_unrelated_ini_content() {
         let _g = lock();
+        let _restore = RestorePortableIniOnDrop;
         let ini_wide = exe_relative("wraith.ini");
         let ini_path = wide_to_path(&ini_wide);
 
@@ -183,22 +265,24 @@ mod tests {
                 "write_back must persist the value it was given"
             );
         }
-
-        let _ = std::fs::remove_file(&ini_path);
+        // _restore (declared above, drops before _g) rewrites the portable
+        // file with sane minimal content -- see its doc comment.
     }
 
     // Behavior 4: wraith.ini is not a hard dependency. Config::load() must
     // fall back to defaults when the file is entirely absent (not just when
-    // a key is missing), and write_back() must be able to create the file
-    // from scratch -- e.g. the settings dialog is the very first thing that
-    // ever touches config on a fresh install with no shipped ini.
+    // a key is missing), and write_back() must be able to create it from
+    // scratch. With no portable ini sitting next to the exe, this now lands
+    // in %LOCALAPPDATA%\Wraith\ -- an installed copy typically lives in
+    // Program Files, which a non-elevated process cannot write to, so this
+    // is also the settings dialog's first-ever write on a fresh install.
     #[test]
-    fn missing_ini_falls_back_to_defaults_and_write_back_creates_it() {
+    fn missing_ini_falls_back_to_defaults_and_write_back_creates_it_in_appdata() {
         let _g = lock();
-        let ini_wide = exe_relative("wraith.ini");
-        let ini_path = wide_to_path(&ini_wide);
-        let _ = std::fs::remove_file(&ini_path);
-        assert!(!std::path::Path::new(&ini_path).exists(), "test setup: ini must be absent");
+        let _restore = RestorePortableIniOnDrop;
+        let portable = wide_to_path(&exe_relative("wraith.ini"));
+        let _ = std::fs::remove_file(&portable);
+        assert!(!std::path::Path::new(&portable).exists(), "test setup: portable ini must be absent");
 
         let fresh = Config::load();
         assert_eq!(fresh.lock_mods.load(Relaxed), DEFAULT_LOCK_MODS as u32);
@@ -209,22 +293,39 @@ mod tests {
         fresh.panic_vk.store(88, Relaxed);
         fresh.write_back();
 
-        assert!(std::path::Path::new(&ini_path).exists(), "write_back must create a missing ini file");
+        let resolved = ini_path();
+        let resolved_path = wide_to_path(&resolved);
+        assert_ne!(resolved_path, portable, "with no portable ini, write_back must land in AppData, not next to the exe");
+        assert!(std::path::Path::new(&resolved_path).exists(), "write_back must create a missing ini file");
+
         let panic_key = crate::to_wide("PanicKey");
         let wraith = crate::to_wide("Wraith");
         unsafe {
             assert_eq!(
-                GetPrivateProfileIntW(wraith.as_ptr(), panic_key.as_ptr(), -1, ini_wide.as_ptr()),
+                GetPrivateProfileIntW(wraith.as_ptr(), panic_key.as_ptr(), -1, resolved.as_ptr()),
                 88,
                 "value must be readable back from the freshly created file"
             );
         }
-
-        let _ = std::fs::remove_file(&ini_path);
+        // AppData leftover cleanup, then _restore (drops next, before _g)
+        // rewrites the portable file so the next test starts from a normal,
+        // portable-mode environment rather than "portable missing".
+        let _ = std::fs::remove_file(&resolved_path);
     }
 
-    fn wide_to_path(wide: &[u16]) -> String {
-        let end = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
-        String::from_utf16(&wide[..end]).expect("valid utf-16 path")
+    // Behavior 5: a wraith.ini already sitting next to the exe (portable
+    // mode) takes priority over AppData -- preserves the original behavior
+    // for anyone carrying an exe+ini folder around.
+    #[test]
+    fn portable_ini_next_to_exe_takes_priority_over_appdata() {
+        let _g = lock();
+        let _restore = RestorePortableIniOnDrop;
+        let portable = wide_to_path(&exe_relative("wraith.ini"));
+        std::fs::write(&portable, "[Wraith]\r\nPanicKey=55\r\n").expect("write portable ini");
+
+        assert_eq!(wide_to_path(&ini_path()), portable, "an existing portable ini must win over AppData");
+
+        let cfg = Config::load();
+        assert_eq!(cfg.panic_vk.load(Relaxed), 55, "load() must read the portable file, not AppData");
     }
 }
