@@ -118,9 +118,11 @@ fn is_modifier_vk(vk: u32) -> bool {
 // bits already held. Pure — takes held_mods as a parameter rather than
 // reading MOD_STATE itself, so it's testable without touching global state.
 fn decide_action(vk: u32, held_mods: u32, cfg: &crate::config::Config) -> Option<usize> {
-    if vk == cfg.lock_vk && held_mods & cfg.lock_mods == cfg.lock_mods {
+    let lock_mods = cfg.lock_mods.load(Relaxed);
+    let unlock_mods = cfg.unlock_mods.load(Relaxed);
+    if vk == cfg.lock_vk.load(Relaxed) && held_mods & lock_mods == lock_mods {
         Some(crate::ID_LOCK)
-    } else if vk == cfg.unlock_vk && held_mods & cfg.unlock_mods == cfg.unlock_mods {
+    } else if vk == cfg.unlock_vk.load(Relaxed) && held_mods & unlock_mods == unlock_mods {
         Some(crate::ID_UNLOCK)
     } else {
         None
@@ -150,7 +152,7 @@ unsafe extern "system" fn keyboard_proc(n_code: i32, w_param: WPARAM, l_param: L
         if bit != 0 {
             if is_down { MOD_STATE.fetch_or(bit, Relaxed); } else { MOD_STATE.fetch_and(!bit, Relaxed); }
         }
-        if kb.vkCode == crate::config::Config::get().panic_vk {
+        if kb.vkCode == crate::config::Config::get().panic_vk.load(Relaxed) {
             PANIC_HELD.store(is_down, Relaxed);
         }
     }
@@ -203,14 +205,15 @@ unsafe extern "system" fn mouse_proc(n_code: i32, w_param: WPARAM, l_param: LPAR
 mod tests {
     use super::decide_action;
     use crate::config::Config;
+    use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
     fn cfg() -> Config {
         Config {
-            lock_mods: 7,   // MOD_ALT|MOD_CONTROL|MOD_SHIFT
-            lock_vk: 76,    // 'L'
-            unlock_mods: 7,
-            unlock_vk: 85,  // 'U'
-            panic_vk: 27,
+            lock_mods: AtomicU32::new(7),   // MOD_ALT|MOD_CONTROL|MOD_SHIFT
+            lock_vk: AtomicU32::new(76),    // 'L'
+            unlock_mods: AtomicU32::new(7),
+            unlock_vk: AtomicU32::new(85),  // 'U'
+            panic_vk: AtomicU32::new(27),
             lock_on_start: false,
         }
     }
@@ -244,9 +247,10 @@ mod tests {
 
     #[test]
     fn lock_checked_before_unlock_when_vks_collide() {
-        let mut c = cfg();
-        c.unlock_vk = c.lock_vk; // pathological config: same key for both
-        assert_eq!(decide_action(c.lock_vk, 7, &c), Some(crate::ID_LOCK));
+        let c = cfg();
+        let lock_vk = c.lock_vk.load(Relaxed);
+        c.unlock_vk.store(lock_vk, Relaxed); // pathological config: same key for both
+        assert_eq!(decide_action(lock_vk, 7, &c), Some(crate::ID_LOCK));
     }
 }
 

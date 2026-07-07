@@ -19,8 +19,8 @@ use crate::{
     hooks::{self, APP_HWND, APP_TRAY, LOCKED},
     to_wide,
     tray::TrayIcon,
-    ID_AUTOSTART, ID_EXIT, ID_LOCK, ID_UNLOCK, TIMER_PANIC, TIMER_WATCHDOG, WM_TRAY_MSG,
-    WM_UPDATE_RESULT,
+    ID_AUTOSTART, ID_EXIT, ID_LOCK, ID_SETTINGS, ID_UNLOCK, TIMER_PANIC, TIMER_WATCHDOG,
+    WM_TRAY_MSG, WM_UPDATE_RESULT,
 };
 
 const POLICY_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System";
@@ -109,6 +109,8 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             } else if id == ID_AUTOSTART {
                 if crate::autostart::is_enabled() { crate::autostart::disable(); }
                 else { crate::autostart::enable(); }
+            } else if id == ID_SETTINGS {
+                crate::settings::show(hwnd);
             } else if id == ID_EXIT {
                 DestroyWindow(hwnd);
             }

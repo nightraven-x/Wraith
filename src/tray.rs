@@ -16,7 +16,7 @@ use windows_sys::Win32::{
     },
 };
 
-use crate::{to_wide, ID_AUTOSTART, ID_EXIT, ID_LOCK, ID_UNLOCK, WM_TRAY_MSG};
+use crate::{to_wide, ID_AUTOSTART, ID_EXIT, ID_LOCK, ID_SETTINGS, ID_UNLOCK, WM_TRAY_MSG};
 
 const ICON_ID: u32 = 1;
 const NOTIFYICON_VERSION_4: u32 = 4;
@@ -86,6 +86,9 @@ impl TrayIcon {
 
             AppendMenuW(menu, lock_flags,      ID_LOCK,      to_wide("Lock").as_ptr());
             AppendMenuW(menu, unlock_flags,    ID_UNLOCK,    to_wide("Unlock").as_ptr());
+            // Reachable both locked and unlocked — tray interaction already bypasses
+            // the input hooks, so no special-casing is needed here.
+            AppendMenuW(menu, MF_STRING,       ID_SETTINGS,  to_wide("Settings...").as_ptr());
             AppendMenuW(menu, MF_SEPARATOR,    0,            std::ptr::null());
             AppendMenuW(menu, autostart_flags, ID_AUTOSTART, to_wide("Start with Windows").as_ptr());
             AppendMenuW(menu, MF_SEPARATOR,    0,            std::ptr::null());

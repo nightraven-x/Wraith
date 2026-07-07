@@ -4,6 +4,7 @@ mod app;
 mod autostart;
 mod config;
 mod hooks;
+mod settings;
 mod tray;
 mod updater;
 
@@ -27,6 +28,7 @@ pub(crate) const ID_LOCK: usize = 1001;
 pub(crate) const ID_UNLOCK: usize = 1002;
 pub(crate) const ID_AUTOSTART: usize = 1003;
 pub(crate) const ID_EXIT: usize = 1004;
+pub(crate) const ID_SETTINGS: usize = 1005;
 pub(crate) const TIMER_PANIC:    usize = 2001;
 pub(crate) const TIMER_WATCHDOG: usize = 2002;
 
