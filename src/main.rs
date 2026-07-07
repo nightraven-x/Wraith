@@ -4,6 +4,7 @@ mod app;
 mod autostart;
 mod config;
 mod hooks;
+mod hotkey_recorder;
 mod tray;
 mod updater;
 
