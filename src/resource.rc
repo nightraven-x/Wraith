@@ -8,6 +8,25 @@
 // Application manifest -- embedded as RT_MANIFEST (ID 1)
 1 RT_MANIFEST "../wraith.manifest"
 
+// Settings dialog (id 101 -- must match IDD_SETTINGS in src/settings.rs).
+// Style/control values are raw numerics (no #include <windows.h>, matching
+// the rest of this file):
+//   STYLE 0x80c800c0 = DS_SETFONT(0x40) | DS_MODALFRAME(0x80) |
+//                      WS_POPUP(0x80000000) | WS_CAPTION(0x00C00000) |
+//                      WS_SYSMENU(0x00080000)
+//   EDITTEXT extra style 0x2000 = ES_NUMBER
+//   Control IDs 1 = IDOK, 2 = IDCANCEL (Win32 built-ins), 1101 = IDC_PANIC_VK
+101 DIALOGEX 0, 0, 180, 70
+STYLE 0x80c800c0
+CAPTION "Wraith Settings"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT           "Panic key (VK code):", -1, 10, 10, 120, 8
+    EDITTEXT        1101, 10, 22, 60, 14, 0x2000
+    DEFPUSHBUTTON   "OK", 1, 60, 48, 50, 14
+    PUSHBUTTON      "Cancel", 2, 114, 48, 50, 14
+END
+
 // Version information block (raw numeric values -- no #include <windows.h> needed)
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION     1,0,0,0
