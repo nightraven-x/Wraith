@@ -205,7 +205,7 @@ unsafe extern "system" fn mouse_proc(n_code: i32, w_param: WPARAM, l_param: LPAR
 mod tests {
     use super::decide_action;
     use crate::config::Config;
-    use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 
     fn cfg() -> Config {
         Config {
@@ -214,7 +214,7 @@ mod tests {
             unlock_mods: AtomicU32::new(7),
             unlock_vk: AtomicU32::new(85),  // 'U'
             panic_vk: AtomicU32::new(27),
-            lock_on_start: false,
+            lock_on_start: AtomicBool::new(false),
         }
     }
 

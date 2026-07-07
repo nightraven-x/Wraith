@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use std::sync::OnceLock;
 use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW;
 use windows_sys::Win32::System::WindowsProgramming::{
@@ -17,14 +17,17 @@ const DEFAULT_LOCK_ON_START: i32 = 0;
 // Hotkey/panic-key fields are AtomicU32 so a settings dialog can change them at
 // runtime with no hook reinstall — keyboard_proc already re-reads Config::get()
 // fresh on every keydown, so a plain store here is immediately visible there.
-// lock_on_start is startup-only (read once in main.rs) and stays a plain bool.
+// lock_on_start is only ever read once at startup (main.rs) — nothing in the
+// hook path touches it — but it's still an AtomicBool rather than a plain
+// bool so the settings dialog can update it (the change just has no effect
+// until the next restart, unlike the other 5 fields).
 pub struct Config {
     pub lock_mods: AtomicU32,
     pub lock_vk: AtomicU32,
     pub unlock_mods: AtomicU32,
     pub unlock_vk: AtomicU32,
     pub panic_vk: AtomicU32,
-    pub lock_on_start: bool,
+    pub lock_on_start: AtomicBool,
 }
 
 impl Config {
@@ -47,7 +50,7 @@ impl Config {
             unlock_mods:   AtomicU32::new(get_int!("UnlockModifiers", DEFAULT_UNLOCK_MODS)),
             unlock_vk:     AtomicU32::new(get_int!("UnlockKey",       DEFAULT_UNLOCK_VK)),
             panic_vk:      AtomicU32::new(get_int!("PanicKey",        DEFAULT_PANIC_VK)),
-            lock_on_start: get_int!("LockOnStart",     DEFAULT_LOCK_ON_START) != 0,
+            lock_on_start: AtomicBool::new(get_int!("LockOnStart", DEFAULT_LOCK_ON_START) != 0),
         }
     }
 
@@ -78,7 +81,7 @@ impl Config {
         set_int!("UnlockModifiers", self.unlock_mods.load(Relaxed));
         set_int!("UnlockKey",      self.unlock_vk.load(Relaxed));
         set_int!("PanicKey",       self.panic_vk.load(Relaxed));
-        set_int!("LockOnStart",    self.lock_on_start as u32);
+        set_int!("LockOnStart",    self.lock_on_start.load(Relaxed) as u32);
     }
 }
 
@@ -153,7 +156,7 @@ mod tests {
             unlock_mods: AtomicU32::new(7),
             unlock_vk: AtomicU32::new(85),
             panic_vk: AtomicU32::new(200),
-            lock_on_start: false,
+            lock_on_start: AtomicBool::new(false),
         };
         cfg.write_back();
 

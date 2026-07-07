@@ -139,7 +139,7 @@ fn main() {
         }
 
         // 7. Lock on start if configured
-        if config::Config::get().lock_on_start {
+        if config::Config::get().lock_on_start.load(Relaxed) {
             app::lock();
         }
 
