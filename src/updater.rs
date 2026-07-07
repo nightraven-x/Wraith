@@ -38,6 +38,73 @@ fn parse_ver(s: &str) -> Option<(u32, u32, u32)> {
     Some((parts.next()??, parts.next()??, parts.next()??))
 }
 
+/// Owns the session/connect/request WinHTTP handles for one fetch.
+/// Closes whichever handles were acquired, in reverse order, on drop —
+/// including on an early return mid-`open()`, so every failure path in
+/// `fetch_latest` is cleanup-free.
+struct HttpHandles {
+    session: *mut core::ffi::c_void,
+    connect: *mut core::ffi::c_void,
+    request: *mut core::ffi::c_void,
+}
+
+impl HttpHandles {
+    unsafe fn open(agent: &[u16], host: &[u16], path: &[u16], method: &[u16]) -> Option<Self> {
+        let mut h = HttpHandles {
+            session: std::ptr::null_mut(),
+            connect: std::ptr::null_mut(),
+            request: std::ptr::null_mut(),
+        };
+
+        h.session = WinHttpOpen(
+            agent.as_ptr(),
+            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+        );
+        if h.session.is_null() {
+            return None;
+        }
+
+        h.connect = WinHttpConnect(h.session, host.as_ptr(), 443, 0);
+        if h.connect.is_null() {
+            return None;
+        }
+
+        h.request = WinHttpOpenRequest(
+            h.connect,
+            method.as_ptr(),
+            path.as_ptr(),
+            std::ptr::null(),               // lpszVersion: *const u16 (NULL = HTTP/1.1)
+            std::ptr::null(),               // lpszReferrer: *const u16
+            std::ptr::null::<*const u16>(), // lplszAcceptTypes: *const *const u16
+            WINHTTP_FLAG_SECURE,
+        );
+        if h.request.is_null() {
+            return None;
+        }
+
+        Some(h)
+    }
+}
+
+impl Drop for HttpHandles {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.request.is_null() {
+                WinHttpCloseHandle(self.request);
+            }
+            if !self.connect.is_null() {
+                WinHttpCloseHandle(self.connect);
+            }
+            if !self.session.is_null() {
+                WinHttpCloseHandle(self.session);
+            }
+        }
+    }
+}
+
 /// Fetch the latest GitHub release body via WinHTTP.
 /// Returns `None` on any network or API error.
 unsafe fn fetch_latest() -> Option<Vec<u8>> {
@@ -46,63 +113,27 @@ unsafe fn fetch_latest() -> Option<Vec<u8>> {
     let path = crate::to_wide("/repos/shadow-dragon-2002/Wraith/releases/latest");
     let method = crate::to_wide("GET");
 
-    let session = WinHttpOpen(
-        agent.as_ptr(),
-        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-        std::ptr::null(),
-        std::ptr::null(),
-        0,
-    );
-    if session.is_null() {
-        return None;
-    }
-
-    let connect = WinHttpConnect(session, host.as_ptr(), 443, 0);
-    if connect.is_null() {
-        WinHttpCloseHandle(session);
-        return None;
-    }
-
-    let request = WinHttpOpenRequest(
-        connect,
-        method.as_ptr(),
-        path.as_ptr(),
-        std::ptr::null(),                    // lpszVersion: *const u16 (NULL = HTTP/1.1)
-        std::ptr::null(),                    // lpszReferrer: *const u16
-        std::ptr::null::<*const u16>(),      // lplszAcceptTypes: *const *const u16
-        WINHTTP_FLAG_SECURE,
-    );
-    if request.is_null() {
-        WinHttpCloseHandle(connect);
-        WinHttpCloseHandle(session);
-        return None;
-    }
+    let h = HttpHandles::open(&agent, &host, &path, &method)?;
 
     let timeout = 10000u32;
-    WinHttpSetOption(request, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout as *const u32 as *const core::ffi::c_void, 4);
-    WinHttpSetOption(request, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout as *const u32 as *const core::ffi::c_void, 4);
+    WinHttpSetOption(h.request, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout as *const u32 as *const core::ffi::c_void, 4);
+    WinHttpSetOption(h.request, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout as *const u32 as *const core::ffi::c_void, 4);
 
     let sent = WinHttpSendRequest(
-        request,
-        std::ptr::null(),       // lpszHeaders: *const u16 (WINHTTP_NO_ADDITIONAL_HEADERS)
-        0,                      // dwHeadersLength
-        std::ptr::null_mut(),   // lpOptional: *mut c_void (no request body)
-        0,                      // dwOptionalLength
-        0,                      // dwTotalLength
-        0,                      // dwContext
+        h.request,
+        std::ptr::null(),     // lpszHeaders: *const u16 (WINHTTP_NO_ADDITIONAL_HEADERS)
+        0,                    // dwHeadersLength
+        std::ptr::null_mut(), // lpOptional: *mut c_void (no request body)
+        0,                    // dwOptionalLength
+        0,                    // dwTotalLength
+        0,                    // dwContext
     );
     if sent == 0 {
-        WinHttpCloseHandle(request);
-        WinHttpCloseHandle(connect);
-        WinHttpCloseHandle(session);
         return None;
     }
 
-    let received = WinHttpReceiveResponse(request, std::ptr::null_mut());
+    let received = WinHttpReceiveResponse(h.request, std::ptr::null_mut());
     if received == 0 {
-        WinHttpCloseHandle(request);
-        WinHttpCloseHandle(connect);
-        WinHttpCloseHandle(session);
         return None;
     }
 
@@ -111,7 +142,7 @@ unsafe fn fetch_latest() -> Option<Vec<u8>> {
     loop {
         let mut bytes_read: u32 = 0;
         let ok = WinHttpReadData(
-            request,
+            h.request,
             buf.as_mut_ptr() as *mut core::ffi::c_void,
             buf.len() as u32,
             &mut bytes_read,
@@ -121,10 +152,6 @@ unsafe fn fetch_latest() -> Option<Vec<u8>> {
         }
         body.extend_from_slice(&buf[..bytes_read as usize]);
     }
-
-    WinHttpCloseHandle(request);
-    WinHttpCloseHandle(connect);
-    WinHttpCloseHandle(session);
 
     Some(body)
 }
