@@ -14,17 +14,36 @@
 //   STYLE 0x80c800c0 = DS_SETFONT(0x40) | DS_MODALFRAME(0x80) |
 //                      WS_POPUP(0x80000000) | WS_CAPTION(0x00C00000) |
 //                      WS_SYSMENU(0x00080000)
-//   EDITTEXT extra style 0x2000 = ES_NUMBER
-//   Control IDs 1 = IDOK, 2 = IDCANCEL (Win32 built-ins), 1101 = IDC_PANIC_VK
-101 DIALOGEX 0, 0, 180, 70
+//   EDITTEXT extra style 0x2000 = ES_NUMBER, 0x0080 = ES_AUTOHSCROLL
+//   CONTROL "Lock on start" style 0x50010003 = WS_CHILD(0x40000000) |
+//                      WS_VISIBLE(0x10000000) | WS_TABSTOP(0x00010000) |
+//                      BS_AUTOCHECKBOX(0x0003) -- CONTROL statements (unlike
+//                      the predefined EDITTEXT/LTEXT/PUSHBUTTON statements
+//                      above) get no implicit WS_CHILD/WS_VISIBLE, so both
+//                      must be spelled out explicitly here.
+//   Control IDs 1 = IDOK, 2 = IDCANCEL (Win32 built-ins), 1101 = IDC_PANIC_VK,
+//   1102 = IDC_LOCK_COMBO, 1103 = IDC_UNLOCK_COMBO, 1104 = IDC_VALIDATION_ERROR,
+//   1105 = IDC_LOCK_ON_START
+101 DIALOGEX 0, 0, 200, 160
 STYLE 0x80c800c0
 CAPTION "Wraith Settings"
 FONT 8, "MS Shell Dlg"
 BEGIN
     LTEXT           "Panic key (VK code):", -1, 10, 10, 120, 8
     EDITTEXT        1101, 10, 22, 60, 14, 0x2000
-    DEFPUSHBUTTON   "OK", 1, 60, 48, 50, 14
-    PUSHBUTTON      "Cancel", 2, 114, 48, 50, 14
+
+    LTEXT           "Lock combo:", -1, 10, 44, 120, 8
+    EDITTEXT        1102, 10, 56, 120, 14, 0x0080
+
+    LTEXT           "Unlock combo:", -1, 10, 78, 120, 8
+    EDITTEXT        1103, 10, 90, 120, 14, 0x0080
+
+    CONTROL         "Lock on start", 1105, "Button", 0x50010003, 10, 108, 100, 12
+
+    LTEXT           "", 1104, 10, 128, 180, 10
+
+    DEFPUSHBUTTON   "OK", 1, 80, 142, 50, 14
+    PUSHBUTTON      "Cancel", 2, 134, 142, 50, 14
 END
 
 // Version information block (raw numeric values -- no #include <windows.h> needed)

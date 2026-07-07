@@ -211,10 +211,20 @@ unsafe extern "system" fn subclass_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
     }
 }
 
+// GetAsyncKeyState / SendInput touch REAL global keyboard state, so any test
+// anywhere in this crate that synthesizes key input must serialize against
+// this lock or two such tests running on cargo's parallel test threads will
+// corrupt each other's modifier reads. pub(crate) so settings.rs's own
+// combo-recording tests (which drive this same subclass control indirectly
+// through the settings dialog) can share it rather than maintaining a second,
+// racing lock.
+#[cfg(test)]
+pub(crate) static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, Once};
+    use std::sync::Once;
     use std::time::{Duration, Instant};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -226,10 +236,6 @@ mod tests {
         ES_AUTOHSCROLL, MSG, PM_REMOVE, SW_SHOWNOACTIVATE, WNDCLASSEXW, WS_CHILD,
         WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
     };
-
-    // GetAsyncKeyState / SendInput touch REAL global keyboard state, so tests
-    // must not run concurrently or they'll corrupt each other's modifier reads.
-    static SERIAL: Mutex<()> = Mutex::new(());
     static REGISTER_CLASS: Once = Once::new();
 
     fn register_class_once() {
