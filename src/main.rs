@@ -6,6 +6,7 @@ mod config;
 mod hooks;
 mod hotkey_recorder;
 mod settings;
+mod theme;
 mod tray;
 mod updater;
 

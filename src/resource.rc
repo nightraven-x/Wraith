@@ -26,26 +26,26 @@
 //   Control IDs 1 = IDOK, 2 = IDCANCEL (Win32 built-ins), 1101 = IDC_PANIC_VK,
 //   1102 = IDC_LOCK_COMBO, 1103 = IDC_UNLOCK_COMBO, 1104 = IDC_VALIDATION_ERROR,
 //   1105 = IDC_LOCK_ON_START
-101 DIALOGEX 0, 0, 200, 160
+101 DIALOGEX 0, 0, 240, 200
 STYLE 0x80c800c0
 CAPTION "Wraith Settings"
-FONT 8, "MS Shell Dlg"
+FONT 9, "Segoe UI"
 BEGIN
-    LTEXT           "Panic key:", -1, 10, 10, 120, 8
-    EDITTEXT        1101, 10, 22, 120, 14, 0x0080
+    LTEXT           "Panic key:", -1, 12, 12, 120, 8
+    EDITTEXT        1101, 12, 24, 216, 14, 0x0080
 
-    LTEXT           "Lock combo:", -1, 10, 44, 120, 8
-    EDITTEXT        1102, 10, 56, 120, 14, 0x0080
+    LTEXT           "Lock combo:", -1, 12, 50, 120, 8
+    EDITTEXT        1102, 12, 62, 216, 14, 0x0080
 
-    LTEXT           "Unlock combo:", -1, 10, 78, 120, 8
-    EDITTEXT        1103, 10, 90, 120, 14, 0x0080
+    LTEXT           "Unlock combo:", -1, 12, 88, 120, 8
+    EDITTEXT        1103, 12, 100, 216, 14, 0x0080
 
-    CONTROL         "Lock on start", 1105, "Button", 0x50010003, 10, 108, 100, 12
+    CONTROL         "Lock on start", 1105, "Button", 0x50010003, 12, 126, 120, 12
 
-    LTEXT           "", 1104, 10, 128, 180, 10
+    LTEXT           "", 1104, 12, 146, 216, 10
 
-    DEFPUSHBUTTON   "OK", 1, 80, 142, 50, 14
-    PUSHBUTTON      "Cancel", 2, 134, 142, 50, 14
+    DEFPUSHBUTTON   "OK", 1, 122, 168, 50, 14
+    PUSHBUTTON      "Cancel", 2, 178, 168, 50, 14
 END
 
 // Version information block (raw numeric values -- no #include <windows.h> needed)

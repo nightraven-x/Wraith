@@ -4,6 +4,8 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/unlocked-white.ico");
     println!("cargo:rerun-if-changed=assets/locked-white.ico");
     println!("cargo:rustc-link-lib=winhttp");
+    println!("cargo:rustc-link-lib=dwmapi");
+    println!("cargo:rustc-link-lib=uxtheme");
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let out = std::env::var("OUT_DIR").unwrap();

@@ -12,14 +12,16 @@
 // same thread's message queue, and DialogBoxParamW still dispatches all
 // messages on that queue while the dialog is up.
 
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use windows_sys::Win32::{
-    Foundation::{HWND, LPARAM, WPARAM},
+    Foundation::{COLORREF, HWND, LPARAM, WPARAM},
+    Graphics::Gdi::{CreateSolidBrush, SetBkColor, SetTextColor, HBRUSH, HDC},
     System::LibraryLoader::GetModuleHandleW,
     UI::Controls::{CheckDlgButton, IsDlgButtonChecked, BST_CHECKED, BST_UNCHECKED},
     UI::WindowsAndMessaging::{
         DialogBoxParamW, EndDialog, GetDlgItem, SetDlgItemTextW,
-        IDCANCEL, IDOK, WM_CLOSE, WM_COMMAND, WM_INITDIALOG,
+        IDCANCEL, IDOK, WM_CLOSE, WM_COMMAND, WM_CTLCOLORDLG, WM_CTLCOLOREDIT,
+        WM_CTLCOLORSTATIC, WM_INITDIALOG,
     },
 };
 
@@ -36,6 +38,37 @@ pub(crate) const IDC_LOCK_ON_START: i32 = 1105;
 
 const ERR_ZERO_MODIFIER: &str = "Lock and unlock combos both need at least one modifier key.";
 const ERR_PANIC_RANGE: &str = "Panic key must be a VK code between 1 and 255.";
+
+// Set once per dialog open (WM_INITDIALOG), read by the WM_CTLCOLOR* handlers
+// that follow on the same thread's message loop -- mirrors the plain-atomic
+// pattern hooks.rs uses for cross-message state, no Mutex needed.
+static DARK_MODE: AtomicBool = AtomicBool::new(false);
+
+// Created lazily on first use and kept for the process's lifetime -- the
+// dialog can be opened many times, but these two colors never change, so one
+// GDI brush of each is reused across every open rather than
+// created/destroyed per-open. Never freed; a leak of exactly two long-lived
+// GDI objects is the deliberately simpler alternative to lifecycle-tracking
+// them across repeated modal opens.
+static DLG_BRUSH: AtomicUsize = AtomicUsize::new(0);
+static EDIT_BRUSH: AtomicUsize = AtomicUsize::new(0);
+
+const DARK_BG: COLORREF = 0x00202020; // RGB(0x20,0x20,0x20)
+const DARK_EDIT_BG: COLORREF = 0x002B2B2B; // RGB(0x2B,0x2B,0x2B)
+const DARK_TEXT: COLORREF = 0x00F0F0F0; // RGB(0xF0,0xF0,0xF0)
+
+// DialogBoxParamW always pumps on the thread that called it (main thread
+// here, see `show`'s doc comment) -- single-threaded, so a plain
+// load-then-store is enough, no compare_exchange race to guard against.
+fn brush_for(color: COLORREF, slot: &AtomicUsize) -> HBRUSH {
+    let existing = slot.load(Relaxed);
+    if existing != 0 {
+        return existing as HBRUSH;
+    }
+    let created = unsafe { CreateSolidBrush(color) };
+    slot.store(created as usize, Relaxed);
+    created
+}
 
 // Test-only handshake: DialogBoxParamW is modal and pumps its own message
 // loop on whatever thread calls it, so a test driving the dialog from a
@@ -112,6 +145,7 @@ unsafe extern "system" fn dlg_proc(hwnd: HWND, msg: u32, wp: WPARAM, _lp: LPARAM
                 (cfg.unlock_mods.load(Relaxed), cfg.unlock_vk.load(Relaxed)),
             );
 
+            let checkbox = GetDlgItem(hwnd, IDC_LOCK_ON_START);
             CheckDlgButton(
                 hwnd,
                 IDC_LOCK_ON_START,
@@ -120,6 +154,16 @@ unsafe extern "system" fn dlg_proc(hwnd: HWND, msg: u32, wp: WPARAM, _lp: LPARAM
                 } else {
                     BST_UNCHECKED
                 },
+            );
+
+            let dark = crate::theme::system_prefers_dark();
+            DARK_MODE.store(dark, Relaxed);
+            let ok_btn = GetDlgItem(hwnd, IDOK);
+            let cancel_btn = GetDlgItem(hwnd, IDCANCEL);
+            crate::theme::apply(
+                hwnd,
+                dark,
+                &[panic_edit, lock_edit, unlock_edit, checkbox, ok_btn, cancel_btn],
             );
 
             set_error(hwnd, "");
@@ -187,6 +231,32 @@ unsafe extern "system" fn dlg_proc(hwnd: HWND, msg: u32, wp: WPARAM, _lp: LPARAM
         WM_CLOSE => {
             EndDialog(hwnd, 0);
             1
+        }
+
+        // Dark-mode painting for the dialog background, labels, and edit
+        // fields. wp = HDC to paint with (every label/field gets the same
+        // treatment, no need to branch on which control it is). Light mode
+        // (the common case) falls through to 0 -- default system handling,
+        // identical to pre-dark-mode behavior.
+        WM_CTLCOLORDLG if DARK_MODE.load(Relaxed) => {
+            let hdc = wp as HDC;
+            SetTextColor(hdc, DARK_TEXT);
+            SetBkColor(hdc, DARK_BG);
+            brush_for(DARK_BG, &DLG_BRUSH) as isize
+        }
+
+        WM_CTLCOLORSTATIC if DARK_MODE.load(Relaxed) => {
+            let hdc = wp as HDC;
+            SetTextColor(hdc, DARK_TEXT);
+            SetBkColor(hdc, DARK_BG);
+            brush_for(DARK_BG, &DLG_BRUSH) as isize
+        }
+
+        WM_CTLCOLOREDIT if DARK_MODE.load(Relaxed) => {
+            let hdc = wp as HDC;
+            SetTextColor(hdc, DARK_TEXT);
+            SetBkColor(hdc, DARK_EDIT_BG);
+            brush_for(DARK_EDIT_BG, &EDIT_BRUSH) as isize
         }
 
         _ => 0,
