@@ -33,13 +33,37 @@ pub(crate) const ID_SETTINGS: usize = 1005;
 pub(crate) const TIMER_PANIC:    usize = 2001;
 pub(crate) const TIMER_WATCHDOG: usize = 2002;
 
+// Internal-only CLI flag: the RunOnce failsafe (app.rs's register_cleanup_failsafe)
+// invokes this exe with this flag to clear a stuck DisableTaskMgr policy at the
+// next interactive logon, in case Wraith never got the chance to clean up after
+// itself (crash, forced kill, power loss -- none of which let a dying process
+// run its own code). Not a user-facing flag.
+pub(crate) const CLEANUP_TASKMGR_FLAG: &str = "--cleanup-taskmgr";
+
 pub(crate) static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
 pub(crate) fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+// Pure so it's unit-testable without a real process argv. The RunOnce
+// failsafe (app.rs) invokes this exe with exactly one argument -- the
+// cleanup flag -- so anything else (no args, a different arg) is a normal
+// launch.
+fn is_cleanup_invocation(args: &[String]) -> bool {
+    args.get(1).map(String::as_str) == Some(CLEANUP_TASKMGR_FLAG)
+}
+
 fn main() {
+    // Handled before the single-instance mutex and everything else: this is
+    // a RunOnce-triggered cleanup call, not a normal launch, and must run
+    // (and exit) regardless of whether a real Wraith instance is running.
+    let args: Vec<String> = std::env::args().collect();
+    if is_cleanup_invocation(&args) {
+        app::startup_cleanup();
+        unsafe { ExitProcess(0); }
+    }
+
     unsafe {
         // 1. Single-instance guard
         let mutex_name = to_wide("Global\\WraithSingleInstance");
@@ -158,5 +182,29 @@ fn main() {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn recognizes_the_cleanup_flag_as_argv1() {
+        assert!(is_cleanup_invocation(&args(&["wraith.exe", CLEANUP_TASKMGR_FLAG])));
+    }
+
+    #[test]
+    fn normal_launch_with_no_args_is_not_a_cleanup_invocation() {
+        assert!(!is_cleanup_invocation(&args(&["wraith.exe"])));
+    }
+
+    #[test]
+    fn an_unrelated_argument_is_not_a_cleanup_invocation() {
+        assert!(!is_cleanup_invocation(&args(&["wraith.exe", "--some-other-flag"])));
     }
 }
