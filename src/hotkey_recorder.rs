@@ -157,8 +157,14 @@ unsafe extern "system" fn subclass_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
         WM_KEYDOWN | WM_SYSKEYDOWN => {
             let vk = wp as u32;
 
-            if vk == VK_ESCAPE {
-                // Cancel: restore previously committed value, discard any preview.
+            if vk == VK_ESCAPE && state.previewing {
+                // Cancel a modifier preview: restore previously committed
+                // value, discard the preview. Only intercepted while a
+                // preview is active -- pressing Escape standalone (no
+                // modifier currently held) instead commits Escape as the
+                // recorded key like any other non-modifier key would, since
+                // callers may legitimately want to record Escape itself (the
+                // default panic key, in Wraith's case).
                 state.previewing = false;
                 set_text(hwnd, state.mods, state.vk);
                 return 0;
@@ -394,6 +400,28 @@ mod tests {
 
         assert_eq!(value(edit), (0, VK_A as u32));
         assert_eq!(window_text(edit), "A");
+
+        destroy_test_window(top);
+    }
+
+    #[test]
+    fn escape_alone_commits_as_the_recorded_key() {
+        // Escape only cancels while a modifier preview is active (see the
+        // guard in subclass_proc). Pressed standalone -- no modifier
+        // currently held -- it must commit like any other non-modifier key,
+        // since callers may legitimately want to record Escape itself (e.g.
+        // Wraith's own default panic key).
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (top, edit) = create_test_edit();
+        install(edit, (0, 0));
+
+        let esc = HeldKey::press(VK_ESC);
+        pump_for(80);
+        drop(esc);
+        pump_for(80);
+
+        assert_eq!(value(edit), (0, VK_ESCAPE));
+        assert_eq!(window_text(edit), "Escape");
 
         destroy_test_window(top);
     }
