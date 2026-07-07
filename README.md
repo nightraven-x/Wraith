@@ -24,7 +24,7 @@ That's the whole mechanism. No kernel driver, no virtual device, no registry tri
 
 **What Wraith protects against:** a person sitting down at the keyboard. **What it doesn't:** software already running on the machine. Any process that calls `SendInput()` sets the injected flag and passes straight through — that's the intended behavior, since that's how your AI agent sends input. On a clean machine running only software you trust, that's the right trade-off.
 
-There's one thing you can't block from user mode: `Ctrl+Alt+Del`. Microsoft hardwired that into the kernel as the Secure Attention Sequence and no application can intercept it. Everything else is fair game.
+There's one thing you can't block from user mode: `Ctrl+Alt+Del`. Microsoft hardwired that into the kernel as the Secure Attention Sequence and no application can intercept it. Its secure-desktop screen has its own Task Manager though, which *could* kill `wraith.exe` and end the lock — Wraith closes that gap by disabling Task Manager for the duration of the lock (restored on unlock, on exit, and automatically at your next login if Wraith never got the chance to clean up itself).
 
 ---
 
@@ -61,14 +61,21 @@ To proceed: click **More info**, then **Run anyway**. You're running a ~50KB Rus
 | Panic unlock | Hold `Esc` for 3 seconds |
 | Toggle | Double-click the tray icon |
 | Menu | Right-click the tray icon |
+| Settings | Right-click the tray icon → Settings... |
 
 The panic unlock is there as a last resort — if you forget your hotkey combo or something goes wrong, hold Escape for three seconds and it unlocks regardless.
 
 ---
 
+## Settings
+
+Right-click the tray icon and choose **Settings...** to change the lock combo, unlock combo, panic key, and lock-on-start without touching any files. Click into a combo field and press the keys you want — it records live. Changes apply immediately (no restart) and are written back to `wraith.ini` on OK.
+
+---
+
 ## Configuration
 
-All settings live in `wraith.ini` next to the `.exe`. Edit it in Notepad and restart Wraith to apply changes.
+Settings also live in `wraith.ini` and can be edited by hand — restart Wraith afterward to apply changes made that way. Wraith looks for `wraith.ini` next to the `.exe` first (portable mode); if it's not there — e.g. an installed copy in Program Files, which a standard user account can't write to — it uses `%LOCALAPPDATA%\Wraith\wraith.ini` instead.
 
 ```ini
 [Wraith]
@@ -124,13 +131,16 @@ If you want to embed custom icons, drop your `.ico` files into `assets/` and upd
 
 ```
 src/
-  main.rs       startup, single-instance mutex, message loop
-  app.rs        lock/unlock, WndProc, DisableTaskMgr policy
-  hooks.rs      keyboard and mouse hook callbacks, global atomics
-  tray.rs       system tray icon, menu, balloon notifications
-  config.rs     wraith.ini loading
-  autostart.rs  Windows startup registry entry
-  updater.rs    background GitHub release check
+  main.rs            startup, single-instance mutex, --cleanup-taskmgr fast-path, message loop
+  app.rs              lock/unlock, WndProc, DisableTaskMgr policy + RunOnce crash-safety failsafe
+  hooks.rs            keyboard and mouse hook callbacks, global atomics
+  tray.rs              system tray icon, menu, balloon notifications
+  config.rs            wraith.ini load + write-back, portable/%LOCALAPPDATA% resolution
+  autostart.rs         Windows startup registry entry
+  settings.rs          native Win32 settings dialog
+  hotkey_recorder.rs   reusable control for capturing a key combo live
+  theme.rs             dark mode + rounded corners for the settings dialog
+  updater.rs           background GitHub release check
 
 installer/wraith.nsi   NSIS installer script
 .github/workflows/     CI — builds the .exe and creates releases on tag push

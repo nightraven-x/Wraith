@@ -60,8 +60,8 @@ No kernel driver required. No `BlockInput()` (which blocks synthetic too). Pure 
 
 ### Hard limits (cannot be changed in user mode)
 
-- `Ctrl+Alt+Del` is the Windows Secure Attention Sequence (SAS) — hardwired into the kernel, unreachable from user-mode hooks
-- A process with sufficient privilege (e.g. Task Manager as Administrator) can always terminate Wraith — by design, as an escape hatch
+- `Ctrl+Alt+Del` is the Windows Secure Attention Sequence (SAS) — hardwired into the kernel, unreachable from user-mode hooks. Its secure-desktop screen has its own Task Manager, which Wraith closes off by disabling Task Manager (`DisableTaskMgr`) for the duration of the lock — see ADR-0008.
+- A process with sufficient privilege (e.g. Task Manager as Administrator, before the lock disables it, or `taskkill` from an elevated shell) can still terminate Wraith — Windows' security model doesn't let a user-mode process protect itself from that.
 
 ---
 
@@ -118,6 +118,12 @@ Wraith creates an `HWND_MESSAGE` (message-only) window — invisible, never rend
 **Init sequence (order is load-bearing):**
 
 ```
+0. argv[1] == "--cleanup-taskmgr"?
+     └─ app::startup_cleanup(); ExitProcess(0)
+     This is the RunOnce failsafe's own re-invocation of the exe (ADR-0008),
+     not a normal launch — checked BEFORE the single-instance mutex so it
+     runs whether or not a real Wraith instance is already up.
+
 1. CreateMutexW("Global\WraithSingleInstance")
      └─ ERROR_ALREADY_EXISTS → MessageBox + exit
 
@@ -155,8 +161,10 @@ Wraith creates an `HWND_MESSAGE` (message-only) window — invisible, never rend
 | `ID_UNLOCK` | `1002` | WM_COMMAND id |
 | `ID_AUTOSTART` | `1003` | WM_COMMAND id |
 | `ID_EXIT` | `1004` | WM_COMMAND id |
+| `ID_SETTINGS` | `1005` | WM_COMMAND id — opens the settings dialog |
 | `TIMER_PANIC` | `2001` | 100ms panic-unlock poll |
 | `TIMER_WATCHDOG` | `2002` | 5s hook reinstall watchdog |
+| `CLEANUP_TASKMGR_FLAG` | `"--cleanup-taskmgr"` | internal-only argv flag, see step 0 above |
 
 ---
 
@@ -171,6 +179,7 @@ Wraith creates an `HWND_MESSAGE` (message-only) window — invisible, never rend
 pub static LOCKED:   AtomicBool
 pub static APP_HWND: AtomicUsize   // HWND as usize
 pub static APP_TRAY: AtomicUsize   // *mut TrayIcon as usize
+pub static SETTINGS_OPEN: AtomicBool  // true while the settings dialog is up
 
 // Install both WH_KEYBOARD_LL and WH_MOUSE_LL. Stores APP_HWND.
 // Returns Err with a static string on failure — caller must show MessageBox + exit.
@@ -195,6 +204,7 @@ pub fn panic_reset()
 ```
 nCode < 0?           → CallNextHookEx (MSDN mandate, no processing)
 LLKHF_INJECTED set?  → CallNextHookEx (synthetic, pass through)
+SETTINGS_OPEN?       → CallNextHookEx (dialog is up, full passthrough)
 WM_KEYDOWN/SYSKEYDOWN?
   lock_vk + mods_held(lock_mods)?   → PostMessageW(ID_LOCK) + return 1
   unlock_vk + mods_held(unlock_mods)? → PostMessageW(ID_UNLOCK) + return 1
@@ -203,6 +213,10 @@ LOCKED == true?
   otherwise                                  → return 1 (block)
 fallthrough           → CallNextHookEx (pass through, unlocked)
 ```
+
+**Why the hooks pass everything through while the settings dialog is open:**
+
+Recording the *currently active* lock/unlock combo in the settings dialog would otherwise fire the real lock/unlock action mid-edit — `keyboard_proc` matches it before the keystroke ever reaches the dialog's hotkey-recorder control. Worse, if Wraith was already locked when the dialog opened, its own controls (including Cancel) would be unreachable via physical input. `settings::show()` sets `SETTINGS_OPEN` via an RAII guard for the dialog's lifetime, so it comes back down even on an unexpected unwind; `mouse_proc` has the same check.
 
 **Why modifier key-ups pass through when locked:**
 
@@ -216,7 +230,7 @@ Windows silently removes a hook if its callback does not return within `LowLevel
 
 ### `app.rs` — Lock/unlock logic and WndProc
 
-**Responsibilities:** `lock()`, `unlock()`, `toggle()`, `wnd_proc`, DisableTaskMgr policy (private), startup crash cleanup.
+**Responsibilities:** `lock()`, `unlock()`, `toggle()`, `wnd_proc`, DisableTaskMgr policy + RunOnce crash-safety failsafe (private), startup crash cleanup.
 
 **Public API:**
 
@@ -232,7 +246,9 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
 
 1. Early-return if already locked
 2. `LOCKED.store(true, Relaxed)`
-3. `task_mgr_block()` — set `DisableTaskMgr = 1` in registry (private to `app.rs`)
+3. `task_mgr_block()` — set `DisableTaskMgr = 1` in registry and register the
+   `RunOnce\WraithTaskMgrCleanup` failsafe entry (private to `app.rs`; no-ops
+   if the registry write is denied — see ADR-0008's consequences)
 4. `SetTimer(hwnd, TIMER_PANIC, 100ms)` — start panic unlock poll
 5. `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)` — prevent sleep/screensaver
 6. `tray().set_locked(true)` — update tray icon + tooltip
@@ -241,7 +257,8 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
 
 1. Early-return if already unlocked
 2. `LOCKED.store(false, Relaxed)`
-3. `task_mgr_unblock()` — delete `DisableTaskMgr` from registry (private to `app.rs`)
+3. `task_mgr_unblock()` — delete `DisableTaskMgr` and the `RunOnce` failsafe
+   entry from the registry (private to `app.rs`)
 4. `KillTimer(hwnd, TIMER_PANIC)` — stop panic poll
 5. `hooks::panic_reset()` — clear hold timer
 6. `SetThreadExecutionState(ES_CONTINUOUS)` — restore sleep/screensaver
@@ -257,13 +274,14 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
 | `WM_COMMAND` | `LOWORD(wp) == ID_UNLOCK` | `unlock()` |
 | `WM_COMMAND` | `LOWORD(wp) == ID_AUTOSTART` | Toggle autostart registry entry |
 | `WM_COMMAND` | `LOWORD(wp) == ID_EXIT` | `DestroyWindow(hwnd)` |
+| `WM_COMMAND` | `LOWORD(wp) == ID_SETTINGS` | `settings::show(hwnd)` — reachable whether locked or unlocked |
 | `WM_TIMER` | `wp == TIMER_PANIC && LOCKED && panic_key_tick()` | `unlock()` |
 | `WM_TIMER` | `wp == TIMER_WATCHDOG` | `hooks::watchdog()` |
 | `WM_UPDATE_RESULT` | `lp != 0` | Free `Box<String>`, show balloon |
-| `WM_DESTROY` | — | `hooks::uninstall()`, drop TrayIcon Box, `PostQuitMessage(0)` |
+| `WM_DESTROY` | — | `hooks::uninstall()`, `task_mgr_unblock()` **unconditionally** (not gated on `LOCKED` — see ADR-0008), drop TrayIcon Box, `PostQuitMessage(0)` |
 | `TASKBAR_CREATED` | — | `tray().re_add()` — recover from Explorer crash |
 
-**Important:** `WM_ENDSESSION` and `WM_QUERYENDSESSION` are NOT delivered to `HWND_MESSAGE` windows. The OS reclaims hooks and tray icon on process exit — no shutdown handler is needed or possible.
+**Important:** `WM_ENDSESSION` and `WM_QUERYENDSESSION` are NOT delivered to `HWND_MESSAGE` windows. The OS reclaims hooks and tray icon on process exit — no shutdown handler is needed or possible. This is exactly why `WM_DESTROY`'s `task_mgr_unblock()` call can't be conditional on a clean `unlock()` first: a plain "Exit while locked" from the tray menu is a real, deterministic path that never touches `unlock()`.
 
 ---
 
@@ -305,30 +323,40 @@ Icons are embedded as Win32 resources via `windres` (see `build.rs`). Resource I
 
 ### `config.rs` — INI configuration
 
-**Responsibilities:** Load `wraith.ini` via `GetPrivateProfileIntW`, cache in `OnceLock`.
+**Responsibilities:** Load `wraith.ini` via `GetPrivateProfileIntW`, cache in `OnceLock`, write changes back for the settings dialog, resolve portable vs. `%LOCALAPPDATA%` location.
 
 **Public API:**
 
 ```rust
 pub struct Config {
-    pub lock_mods: u32,      // modifier bitmask for lock combo
-    pub lock_vk: u32,        // virtual key code for lock combo trigger
-    pub unlock_mods: u32,
-    pub unlock_vk: u32,
-    pub panic_vk: u32,       // virtual key code for panic unlock
-    pub lock_on_start: bool, // lock immediately on launch
+    // AtomicU32/AtomicBool, not plain values — the settings dialog changes
+    // these at runtime with no hook reinstall needed. keyboard_proc re-reads
+    // Config::get() fresh on every keydown. See ADR-0007.
+    pub lock_mods: AtomicU32, pub lock_vk: AtomicU32,
+    pub unlock_mods: AtomicU32, pub unlock_vk: AtomicU32,
+    pub panic_vk: AtomicU32, pub lock_on_start: AtomicBool,
 }
 
 impl Config {
-    pub fn get() -> &'static Self  // OnceLock accessor, loads once on first call
+    pub fn load() -> Self;          // reads wraith.ini, falls back to defaults
+    pub fn get() -> &'static Self;  // OnceLock accessor, loads once on first call
+    pub fn write_back(&self);       // persists all 6 keys via WritePrivateProfileStringW
 }
 ```
 
-**INI path resolution:** Resolved relative to the `.exe` location via `GetModuleFileNameW` — not relative to CWD. This ensures the correct `wraith.ini` is loaded even if Wraith is launched from a different directory (e.g. at startup via the Run registry key).
+**Why atomics, not a `Mutex<Config>` or a swappable `&'static Config`:** ADR-0003 already rules out blocking calls in the hook path — a `Mutex` held by the dialog while the hook tries to read it would violate that. Swapping the whole struct (e.g. via `ArcSwap`) would work but adds a dependency and indirection five `AtomicU32`s solve directly. `decide_action` (`hooks.rs`) still takes `&Config` as a plain, pure, testable parameter — call sites just add `.load(Relaxed)`.
+
+`lock_on_start` is the one field that's atomic for `write_back()`'s sake only — the settings dialog's checkbox needs to persist a change to it, but the in-memory value has no live effect; it's read exactly once, in `main.rs`, at startup. Changing it takes effect on the *next* launch.
+
+**Race note (ADR-0007):** a keydown landing mid-write may read a partially-updated combo (new `lock_vk` with the old `lock_mods`, or vice versa). Self-corrects on the next keystroke — accepted as cheaper than synchronizing the 5 fields as one unit; the failure mode is one misfired combo attempt, not a crash or stuck lock.
+
+**INI path resolution (`ini_path()`, ADR-0009):** re-checked dynamically on every call, not cached.
+1. If `wraith.ini` already exists next to the `.exe` (`GetModuleFileNameW` + `GetFileAttributesW`), use it — portable mode, unchanged behavior.
+2. Otherwise, resolve to `%LOCALAPPDATA%\Wraith\wraith.ini`, creating the `Wraith` subdirectory if needed (`CreateDirectoryW`, `ERROR_ALREADY_EXISTS` is fine).
+
+This exists because Program-Files installs run `asInvoker` (no elevation) and can't write there — without the fallback, settings changes would work in memory but silently fail to persist. Test code that deletes the portable candidate to exercise the AppData branch must restore it before releasing shared test state, or "portable missing" leaks into whichever test runs next — see `RestorePortableIniOnDrop` and `lock_config_test()`, the single entry point all config/settings tests use to acquire the shared test lock for exactly this reason.
 
 **Missing INI:** Falls back to compiled-in defaults. No error is shown. Users can always recover by editing or deleting `wraith.ini`.
-
-**Runtime config change:** Not supported. Config is read once at startup and cached immutably. To change hotkeys, edit `wraith.ini` and restart Wraith.
 
 ---
 
@@ -347,6 +375,63 @@ pub fn is_enabled() -> bool  // Query Run key for Wraith value
 **Registry key:** `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `Wraith`.
 
 **Quoted path:** The exe path is wrapped in double quotes (`"C:\Program Files\Wraith\wraith.exe"`) so paths containing spaces survive the Run key parsing.
+
+---
+
+### `settings.rs` — Native settings dialog
+
+**Responsibilities:** `DIALOGEX` modal dialog (panic key, lock combo, unlock combo, lock-on-start), all-or-nothing validation and commit, dark-mode/rounded-corner theming, suspending the hooks while open.
+
+**Public API:**
+
+```rust
+pub fn show(hwnd: HWND);  // DialogBoxParamW — modal, safe from wnd_proc (see below)
+```
+
+**Why a modal dialog is safe to call synchronously from `wnd_proc`:** `DialogBoxParamW` pumps its own message loop on the calling thread until `EndDialog`. The hook callbacks live on that same thread's queue — `DialogBoxParamW` keeps dispatching everything on it while the dialog is up, so it does not stop the hook pump. It does, however, mean physical input to the dialog itself would be blocked by `LOCKED == true` like anything else — which is exactly why `hooks::SETTINGS_OPEN` exists (see the hooks.rs section above): `show()` sets it for the dialog's lifetime via an RAII guard, so it's cleared even on an unexpected unwind.
+
+**Validation, all-or-nothing on OK:**
+- Panic key must be `1..=255` — `0` is Win32's reserved "no key" value; accepting it would silently make panic-unlock unreachable (found in a security audit — see ADR-0007's amendment history).
+- Lock and unlock combos must have at least one modifier — `decide_action` (`hooks.rs`) matches a 0-modifier combo unconditionally (`held_mods & 0 == 0` is vacuously true), which would hijack that key system-wide. The panic key is exempt — it's single-key by design, checked via a separate hold-timer, not `decide_action`.
+- Either every field validates and gets stored + `write_back()`'d, or nothing does — an invalid field keeps the dialog open with an inline error (`IDC_VALIDATION_ERROR`) instead of a partial commit.
+
+**Fields commit directly into the `Config` atomics** (`.store(v, Relaxed)`), taking effect on the very next keydown — no hook reinstall needed, since `keyboard_proc` already re-reads `Config::get()` fresh on every event.
+
+---
+
+### `hotkey_recorder.rs` — Live combo capture control
+
+**Responsibilities:** subclass an existing `EDIT` control so it records the next key combo pressed while focused, instead of accepting typed numeric input.
+
+**Public API:**
+
+```rust
+pub fn install(hwnd: HWND, initial: (u32, u32));  // subclasses an existing EDIT control
+pub fn value(hwnd: HWND) -> (u32, u32);            // reads back the committed (mods, vk)
+```
+
+Classic `SetWindowLongPtrW(GWLP_WNDPROC, ...)` subclassing (not ComCtl32's `SetWindowSubclass`) — the previous `WNDPROC` and per-instance state live in a `Box` addressed via `GWLP_USERDATA`; unhandled messages are forwarded with `CallWindowProcW`; the `Box` is freed on `WM_NCDESTROY`, after forwarding to the original proc first.
+
+`GetAsyncKeyState` is reliable here — unlike in `hooks.rs`'s `LOCKED`-blocking case, this control never blocks the event, so Windows keeps hardware modifier state current.
+
+Deliberately dumb and reusable: it does not itself reject a zero-modifier combo. That policy belongs to whichever dialog consumes it — see `settings.rs`'s validation above.
+
+---
+
+### `theme.rs` — Settings dialog dark mode
+
+**Responsibilities:** detect the system light/dark preference, apply dark titlebar + Windows 11 rounded corners + themed child controls to the settings dialog.
+
+**Public API:**
+
+```rust
+pub fn system_prefers_dark() -> bool;  // reads AppsUseLightTheme from the registry
+pub fn apply(hwnd: HWND, dark: bool, controls: &[HWND]);
+```
+
+`system_prefers_dark()` reads `HKCU\...\Themes\Personalize\AppsUseLightTheme`; a missing key or read failure defaults to light, matching Windows' own default before a user ever visits Settings > Personalization > Colors.
+
+`apply()` sets `DWMWA_USE_IMMERSIVE_DARK_MODE` and `DWMWA_WINDOW_CORNER_PREFERENCE` (`DWMWCP_ROUND`) on the dialog itself, and `SetWindowTheme(..., "DarkMode_Explorer", ...)` on each child control passed in. Called once from `settings.rs`'s `WM_INITDIALOG` — purely cosmetic, no effect on hooks, lock/unlock, or the main message loop. DWM attributes that don't exist pre-Windows-10-1809 just fail silently (ignored `HRESULT`) — the dialog still renders fine via ComCtl32 v6, just without the extras.
 
 ---
 
@@ -675,6 +760,18 @@ Panics in `extern "system"` functions with `panic = "unwind"` produce undefined 
 
 `tokio`, `async-std`, etc. bring thread pools, runtime overhead, and dependency weight. The updater's single background task is trivially handled by `std::thread::spawn` + `PostMessageW`. One extra dependency for one HTTP call is not justified.
 
+### ADR-0007: Mutable config atomics for the settings dialog
+
+`Config`'s five runtime-tunable fields (`lock_mods`, `lock_vk`, `unlock_mods`, `unlock_vk`, `panic_vk`) become `AtomicU32`; `lock_on_start` becomes `AtomicBool`. Supersedes the earlier "config is read-only at runtime" design — issues #12/#13 needed the settings dialog to change hotkeys live and persist them via `write_back()`. A `Mutex<Config>` was rejected (ADR-0003 already bans blocking in the hook path); swapping the whole `&'static Config` (e.g. `ArcSwap`) was rejected as unnecessary indirection for a problem five atomics solve directly. Accepted tradeoff: a keydown landing mid-write may read a stale/partial combo for one event — self-corrects on the next keystroke.
+
+### ADR-0008: RunOnce failsafe for a stuck DisableTaskMgr
+
+A security audit found `WM_DESTROY` never called `task_mgr_unblock()` — exiting while locked left `DisableTaskMgr` stuck with no process left to clear it. Fixed by making that call unconditional. The deeper problem — a forced kill, crash, or power loss gives a dying process no chance to clean up at all — is mitigated (not fully fixed, since it's a hard OS limitation) with an `HKCU\...\RunOnce` entry that re-invokes `wraith.exe --cleanup-taskmgr` at the next interactive logon. Removing the DisableTaskMgr feature entirely was considered and rejected: `Ctrl+Alt+Del`'s secure-desktop Task Manager is otherwise a full escape hatch. A companion watchdog process/service was also considered and rejected as conflicting with the single-.exe, no-async-runtime, minimal-dependency constraints — `RunOnce` gets the same crash-safety property from a registry write the codebase already makes routinely.
+
+### ADR-0009: %LOCALAPPDATA% fallback for config location
+
+`Config::load()`/`write_back()` now resolve through `ini_path()`: use the exe-relative `wraith.ini` if one already exists (portable mode, unchanged), otherwise fall back to `%LOCALAPPDATA%\Wraith\wraith.ini`. Fixes a real gap — the installer puts Wraith in Program Files, the manifest requests `asInvoker` (no elevation), and a standard user account can't write there, so settings changes would work in memory but silently fail to survive a restart. An AppData-only design was rejected: it would silently relocate config for existing portable users the moment they upgrade. The resolution is re-checked on every call (not cached), so tests that delete the portable candidate to exercise the AppData branch must restore it before releasing shared test state.
+
 ---
 
 ## 9. Known limitations
@@ -682,11 +779,13 @@ Panics in `extern "system"` functions with `panic = "unwind"` produce undefined 
 | Limitation | Reason | Workaround |
 |------------|--------|------------|
 | `Ctrl+Alt+Del` cannot be blocked | Kernel-hardwired SAS | `lock()` sets `DisableTaskMgr` in registry, blocking Task Manager from the Ctrl+Alt+Del menu |
-| Wraith can be terminated by any process with sufficient privilege | Windows security model | Run with `requireAdministrator` manifest; standard user accounts cannot kill admin processes |
+| A forced kill/crash/power-loss can leave `DisableTaskMgr` stuck | Dying process gets no chance to clean up | `RunOnce` failsafe clears it at next interactive logon (ADR-0008) — bounded to "until next logon", not fully eliminated |
+| Registry writes to `Policies\System` can be denied (GPO/hardening) | Windows security policy, seen on at least one dev machine | `task_mgr_block()` no-ops in that case; no RunOnce entry is registered either since nothing needs cleaning up |
+| Wraith can still be terminated by a sufficiently privileged process before/outside the lock (e.g. an elevated `taskkill`) | Windows security model | Run with `requireAdministrator` manifest; standard user accounts cannot kill admin processes |
 | Hook silently removed if callback exceeds `LowLevelHooksTimeout` | Windows enforcement | Callbacks are O(1); 5s watchdog timer reinstalls hooks if removed |
 | `WM_ENDSESSION` not received by message-only windows | HWND_MESSAGE limitation | OS reclaims hooks and tray on process exit — no action needed |
 | `SendInput` from another MEDIUM-IL process can inject past hooks | By design | Wraith's purpose is to allow this — it is the feature, not a bug |
-| Config changes require restart | INI is read once into `OnceLock` | Edit `wraith.ini` and restart Wraith |
+| `lock_on_start` change requires restart | Read once into `OnceLock` at startup, unlike the other 5 config fields | Toggle it in the settings dialog or `wraith.ini`, then restart Wraith |
 
 ---
 
