@@ -187,6 +187,42 @@ mod tests {
         let _ = std::fs::remove_file(&ini_path);
     }
 
+    // Behavior 4: wraith.ini is not a hard dependency. Config::load() must
+    // fall back to defaults when the file is entirely absent (not just when
+    // a key is missing), and write_back() must be able to create the file
+    // from scratch -- e.g. the settings dialog is the very first thing that
+    // ever touches config on a fresh install with no shipped ini.
+    #[test]
+    fn missing_ini_falls_back_to_defaults_and_write_back_creates_it() {
+        let _g = lock();
+        let ini_wide = exe_relative("wraith.ini");
+        let ini_path = wide_to_path(&ini_wide);
+        let _ = std::fs::remove_file(&ini_path);
+        assert!(!std::path::Path::new(&ini_path).exists(), "test setup: ini must be absent");
+
+        let fresh = Config::load();
+        assert_eq!(fresh.lock_mods.load(Relaxed), DEFAULT_LOCK_MODS as u32);
+        assert_eq!(fresh.lock_vk.load(Relaxed), DEFAULT_LOCK_VK as u32);
+        assert_eq!(fresh.panic_vk.load(Relaxed), DEFAULT_PANIC_VK as u32);
+        assert!(!fresh.lock_on_start.load(Relaxed));
+
+        fresh.panic_vk.store(88, Relaxed);
+        fresh.write_back();
+
+        assert!(std::path::Path::new(&ini_path).exists(), "write_back must create a missing ini file");
+        let panic_key = crate::to_wide("PanicKey");
+        let wraith = crate::to_wide("Wraith");
+        unsafe {
+            assert_eq!(
+                GetPrivateProfileIntW(wraith.as_ptr(), panic_key.as_ptr(), -1, ini_wide.as_ptr()),
+                88,
+                "value must be readable back from the freshly created file"
+            );
+        }
+
+        let _ = std::fs::remove_file(&ini_path);
+    }
+
     fn wide_to_path(wide: &[u16]) -> String {
         let end = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
         String::from_utf16(&wide[..end]).expect("valid utf-16 path")
