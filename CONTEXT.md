@@ -36,6 +36,14 @@ _Avoid_: event loop, message loop (too generic)
 An emergency unlock mechanism: hold the panic key (default: Esc) for 3 continuous seconds. Works even while locked because `GetAsyncKeyState` reads raw hardware state regardless of hook blocking.
 _Avoid_: emergency unlock, failsafe
 
+**Task Manager anti-circumvention**:
+Setting `HKCU\...\Policies\System\DisableTaskMgr` while locked, and clearing it on unlock. Exists because `Ctrl+Alt+Del` (SAS) can't be blocked in user mode, and its secure-desktop screen offers its own Task Manager — a way to kill wraith.exe and fully escape the lock. Not the same mechanism as panic unlock: this closes an escape route *for someone else*, panic unlock is the owner's own escape route.
+_Avoid_: task manager blocking (too casual — this is a specific registry policy, not a generic verb)
+
+**cleanup failsafe** / **RunOnce failsafe**:
+An `HKCU\...\RunOnce` entry, registered whenever Task Manager anti-circumvention engages, that re-invokes `wraith.exe --cleanup-taskmgr` at the next interactive logon. Exists for the one case nothing running inside the process can handle: a forced kill, crash, or power loss gives a dying process no chance to run its own cleanup, so the policy would otherwise stay stuck indefinitely. Removed on any clean unlock, so it only ever actually fires after an unclean one. See [ADR 0008](docs/adr/0008-runonce-failsafe-for-taskmgr-cleanup.md).
+_Avoid_: watchdog (that name is already taken by the unrelated hook-reinstall timer), backup
+
 **tray icon**:
 The system-tray notification area icon that shows current lock state and provides the right-click context menu.
 _Avoid_: notification icon, status icon
@@ -48,6 +56,14 @@ _Avoid_: settings, preferences, options
 A named global Win32 mutex (`Global\WraithSingleInstance`) that prevents more than one Wraith process from running simultaneously.
 _Avoid_: lock file, process guard
 
+**settings dialog**:
+The native `DIALOGEX` dialog (tray menu → "Settings...") for changing config at runtime: panic key, lock combo, unlock combo, lock-on-start. Commits all fields atomically on OK — either every field validates and gets stored + persisted together, or nothing does. Reachable both locked and unlocked, since tray interaction already bypasses the hooks.
+_Avoid_: options dialog, preferences window
+
+**hotkey recorder**:
+The reusable subclassed `EDIT` control (`hotkey_recorder.rs`) used by the lock-combo and unlock-combo fields in the settings dialog: shows the current combo as human-readable text, replaces it with whatever the user next presses. Deliberately dumb — it does not reject a zero-modifier combo itself; that validation is the settings dialog's job, not the control's.
+_Avoid_: hotkey input, keybind field
+
 ## Example Dialogue
 
 > Dev: "What happens when the AI tool sends a click?"
@@ -58,3 +74,9 @@ _Avoid_: lock file, process guard
 >
 > Dev: "Can they use panic unlock to get in?"
 > Domain expert: "Yes — that's the point. Panic unlock is the owner's failsafe. It requires physically holding Esc for 3 seconds, which Wraith detects via GetAsyncKeyState even though the hook itself is blocking the keystrokes."
+>
+> Dev: "What stops someone from just pressing Ctrl+Alt+Del and killing wraith.exe from Task Manager?"
+> Domain expert: "That's exactly the gap Task Manager anti-circumvention closes. Ctrl+Alt+Del can't be blocked — it's kernel-hardwired — but its secure-desktop screen's own Task Manager can be disabled system-wide while locked. Someone reaching that screen sees a greyed-out Task Manager, not a way to kill the process."
+>
+> Dev: "What if Wraith crashes while that's active — is Task Manager stuck disabled forever?"
+> Domain expert: "No, that's what the cleanup failsafe is for. A crashed or killed process can't run its own cleanup code — that's a hard OS limitation — so instead a RunOnce registry entry fires at the next login and clears it. Bounded to 'until next login' instead of 'forever'."
