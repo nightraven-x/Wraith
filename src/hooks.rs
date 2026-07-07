@@ -114,11 +114,17 @@ fn is_modifier_vk(vk: u32) -> bool {
     modifier_bit(vk) != 0
 }
 
-// Returns true if every modifier bit required by `mods` is held,
-// per our own MOD_STATE tracking (see its doc comment for why not GetAsyncKeyState).
-#[inline(always)]
-fn mods_held(mods: u32) -> bool {
-    MOD_STATE.load(Relaxed) & mods == mods
+// Decides which command (if any) a key-down event fires, given the modifier
+// bits already held. Pure — takes held_mods as a parameter rather than
+// reading MOD_STATE itself, so it's testable without touching global state.
+fn decide_action(vk: u32, held_mods: u32, cfg: &crate::config::Config) -> Option<usize> {
+    if vk == cfg.lock_vk && held_mods & cfg.lock_mods == cfg.lock_mods {
+        Some(crate::ID_LOCK)
+    } else if vk == cfg.unlock_vk && held_mods & cfg.unlock_mods == cfg.unlock_mods {
+        Some(crate::ID_UNLOCK)
+    } else {
+        None
+    }
 }
 
 unsafe extern "system" fn keyboard_proc(n_code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
@@ -152,18 +158,10 @@ unsafe extern "system" fn keyboard_proc(n_code: i32, w_param: WPARAM, l_param: L
     // Only check combos on key-down events.
     if is_down {
         let cfg = crate::config::Config::get();
-        let hwnd = APP_HWND.load(Relaxed) as HWND;
-
-        // Lock combo
-        if kb.vkCode == cfg.lock_vk && mods_held(cfg.lock_mods) {
-            PostMessageW(hwnd, WM_COMMAND, crate::ID_LOCK, 0);
+        if let Some(id) = decide_action(kb.vkCode, MOD_STATE.load(Relaxed), cfg) {
+            let hwnd = APP_HWND.load(Relaxed) as HWND;
+            PostMessageW(hwnd, WM_COMMAND, id, 0);
             return 1; // consume — do NOT call CallNextHookEx
-        }
-
-        // Unlock combo
-        if kb.vkCode == cfg.unlock_vk && mods_held(cfg.unlock_mods) {
-            PostMessageW(hwnd, WM_COMMAND, crate::ID_UNLOCK, 0);
-            return 1; // consume
         }
     }
 
@@ -199,5 +197,56 @@ unsafe extern "system" fn mouse_proc(n_code: i32, w_param: WPARAM, l_param: LPAR
     }
 
     CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decide_action;
+    use crate::config::Config;
+
+    fn cfg() -> Config {
+        Config {
+            lock_mods: 7,   // MOD_ALT|MOD_CONTROL|MOD_SHIFT
+            lock_vk: 76,    // 'L'
+            unlock_mods: 7,
+            unlock_vk: 85,  // 'U'
+            panic_vk: 27,
+            lock_on_start: false,
+        }
+    }
+
+    #[test]
+    fn lock_combo_fires() {
+        assert_eq!(decide_action(76, 7, &cfg()), Some(crate::ID_LOCK));
+    }
+
+    #[test]
+    fn unlock_combo_fires() {
+        assert_eq!(decide_action(85, 7, &cfg()), Some(crate::ID_UNLOCK));
+    }
+
+    #[test]
+    fn wrong_vk_does_not_fire() {
+        assert_eq!(decide_action(65, 7, &cfg()), None);
+    }
+
+    #[test]
+    fn partial_mods_does_not_fire() {
+        // Only Alt+Control held, Shift missing.
+        assert_eq!(decide_action(76, 3, &cfg()), None);
+    }
+
+    #[test]
+    fn extra_held_mods_still_fire() {
+        // Win held in addition to the required combo — still matches.
+        assert_eq!(decide_action(76, 0xF, &cfg()), Some(crate::ID_LOCK));
+    }
+
+    #[test]
+    fn lock_checked_before_unlock_when_vks_collide() {
+        let mut c = cfg();
+        c.unlock_vk = c.lock_vk; // pathological config: same key for both
+        assert_eq!(decide_action(c.lock_vk, 7, &c), Some(crate::ID_LOCK));
+    }
 }
 
