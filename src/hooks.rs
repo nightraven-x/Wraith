@@ -4,13 +4,10 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering::Relaxed};
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, WPARAM},
     System::SystemInformation::GetTickCount,
-    UI::{
-        Input::KeyboardAndMouse::GetAsyncKeyState,
-        WindowsAndMessaging::{
-            CallNextHookEx, PostMessageW, SetWindowsHookExW, UnhookWindowsHookEx,
-            KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL,
-            WM_COMMAND, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
-        },
+    UI::WindowsAndMessaging::{
+        CallNextHookEx, PostMessageW, SetWindowsHookExW, UnhookWindowsHookEx,
+        KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL,
+        WM_COMMAND, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
     },
 };
 
@@ -22,11 +19,18 @@ static KB_HOOK:     AtomicUsize = AtomicUsize::new(0); // HHOOK as usize
 static MOUSE_HOOK:  AtomicUsize = AtomicUsize::new(0); // HHOOK as usize
 static PANIC_START: AtomicU32   = AtomicU32::new(0);   // GetTickCount() snapshot
 
+// Modifier hold state, tracked from the raw keydown/keyup events the hook already
+// sees. GetAsyncKeyState is NOT reliable here: once LOCKED, this same hook returns 1
+// (never calling CallNextHookEx) for modifier keydowns, and that stops Windows from
+// updating the state GetAsyncKeyState reads — so combo checks always saw "not held".
+// Bits: MOD_ALT=0x1, MOD_CONTROL=0x2, MOD_SHIFT=0x4, MOD_WIN=0x8.
+static MOD_STATE:  AtomicU32  = AtomicU32::new(0);
+static PANIC_HELD: AtomicBool = AtomicBool::new(false); // same reasoning, for the panic key
+
 /// Advance the panic-key hold timer. Returns true when the panic key has been
 /// held for >= 3000ms and unlock should fire. Must be called on every TIMER_PANIC tick.
 pub fn panic_key_tick() -> bool {
-    let panic_vk = crate::config::Config::get().panic_vk;
-    let held = (unsafe { GetAsyncKeyState(panic_vk as i32) } as u16) & 0x8000 != 0;
+    let held = PANIC_HELD.load(Relaxed);
     if held {
         let now = unsafe { GetTickCount() };
         let start = PANIC_START.load(Relaxed);
@@ -92,46 +96,29 @@ pub fn uninstall() {
     }
 }
 
-// Returns true for any modifier virtual key code (Shift, Ctrl, Alt, Win, left/right variants).
+// Maps a modifier virtual key code (generic or left/right variant) to its
+// MOD_STATE bit, or 0 if `vk` is not a modifier key.
+#[inline(always)]
+fn modifier_bit(vk: u32) -> u32 {
+    match vk {
+        0x12 | 0xA4 | 0xA5 => 0x1, // VK_MENU, VK_LMENU, VK_RMENU     -> MOD_ALT
+        0x11 | 0xA2 | 0xA3 => 0x2, // VK_CONTROL, VK_LCONTROL, VK_RCONTROL -> MOD_CONTROL
+        0x10 | 0xA0 | 0xA1 => 0x4, // VK_SHIFT, VK_LSHIFT, VK_RSHIFT  -> MOD_SHIFT
+        0x5B | 0x5C        => 0x8, // VK_LWIN, VK_RWIN                -> MOD_WIN
+        _ => 0,
+    }
+}
+
 #[inline(always)]
 fn is_modifier_vk(vk: u32) -> bool {
-    matches!(vk,
-        0x10 | 0x11 | 0x12        // VK_SHIFT, VK_CONTROL, VK_MENU (generic)
-        | 0xA0 | 0xA1             // VK_LSHIFT, VK_RSHIFT
-        | 0xA2 | 0xA3             // VK_LCONTROL, VK_RCONTROL
-        | 0xA4 | 0xA5             // VK_LMENU, VK_RMENU
-        | 0x5B | 0x5C             // VK_LWIN, VK_RWIN
-    )
+    modifier_bit(vk) != 0
 }
 
-// Returns true if the modifier key required by `mod_bit` is currently held.
-// mod_bit: MOD_ALT=0x1, MOD_CONTROL=0x2, MOD_SHIFT=0x4, MOD_WIN=0x8
-#[inline(always)]
-fn mod_held(mod_bit: u32) -> bool {
-    // GetAsyncKeyState returns i16; bit 15 (MSB) set means key is down.
-    // Cast to u16 so we can compare >= 0x8000 without sign issues.
-    let held = |vk: i32| -> bool {
-        (unsafe { GetAsyncKeyState(vk) } as u16) >= 0x8000
-    };
-
-    match mod_bit {
-        0x1 => held(0x12),       // MOD_ALT    -> VK_MENU
-        0x2 => held(0x11),       // MOD_CONTROL -> VK_CONTROL
-        0x4 => held(0x10),       // MOD_SHIFT  -> VK_SHIFT
-        0x8 => held(0x5B) || held(0x5C), // MOD_WIN -> VK_LWIN | VK_RWIN
-        _   => false,
-    }
-}
-
-// Returns true if every modifier bit required by `mods` is held.
+// Returns true if every modifier bit required by `mods` is held,
+// per our own MOD_STATE tracking (see its doc comment for why not GetAsyncKeyState).
 #[inline(always)]
 fn mods_held(mods: u32) -> bool {
-    for bit in [0x1u32, 0x2, 0x4, 0x8] {
-        if mods & bit != 0 && !mod_held(bit) {
-            return false;
-        }
-    }
-    true
+    MOD_STATE.load(Relaxed) & mods == mods
 }
 
 unsafe extern "system" fn keyboard_proc(n_code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
@@ -147,8 +134,23 @@ unsafe extern "system" fn keyboard_proc(n_code: i32, w_param: WPARAM, l_param: L
         return CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param);
     }
 
+    let is_down = w_param == WM_KEYDOWN as WPARAM || w_param == WM_SYSKEYDOWN as WPARAM;
+    let is_up = w_param == WM_KEYUP as WPARAM || w_param == WM_SYSKEYUP as WPARAM;
+
+    // Track modifier and panic-key hold state ourselves from the raw event,
+    // independent of whether this event ends up blocked below.
+    if is_down || is_up {
+        let bit = modifier_bit(kb.vkCode);
+        if bit != 0 {
+            if is_down { MOD_STATE.fetch_or(bit, Relaxed); } else { MOD_STATE.fetch_and(!bit, Relaxed); }
+        }
+        if kb.vkCode == crate::config::Config::get().panic_vk {
+            PANIC_HELD.store(is_down, Relaxed);
+        }
+    }
+
     // Only check combos on key-down events.
-    if w_param == WM_KEYDOWN as WPARAM || w_param == WM_SYSKEYDOWN as WPARAM {
+    if is_down {
         let cfg = crate::config::Config::get();
         let hwnd = APP_HWND.load(Relaxed) as HWND;
 
@@ -169,8 +171,7 @@ unsafe extern "system" fn keyboard_proc(n_code: i32, w_param: WPARAM, l_param: L
     // Exception: modifier key-UP events pass through so the OS doesn't see
     // Ctrl/Shift/Alt as stuck when the lock combo transitions to locked state.
     if LOCKED.load(Relaxed) {
-        let is_keyup = w_param == WM_KEYUP as WPARAM || w_param == WM_SYSKEYUP as WPARAM;
-        if is_keyup && is_modifier_vk(kb.vkCode) {
+        if is_up && is_modifier_vk(kb.vkCode) {
             return CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param);
         }
         return 1; // block — do NOT call CallNextHookEx

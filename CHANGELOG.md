@@ -2,6 +2,19 @@
 
 All notable changes to Wraith are documented here.
 
+## [1.0.1] - 2026-07-07
+
+### Fixed
+
+- Unlock hotkey (and panic-key hold-to-unlock) never fired while locked. The
+  combo check read modifier state via `GetAsyncKeyState`, but our own keyboard
+  hook returns `1` (never calling `CallNextHookEx`) for modifier keydowns
+  while locked — which stops Windows from updating the state
+  `GetAsyncKeyState` reads. So Ctrl/Alt/Shift always read as "not held" during
+  the unlock check, even while physically pressed, and the combo could never
+  match. Fixed by tracking modifier and panic-key hold state ourselves from
+  the raw hook events instead of trusting `GetAsyncKeyState`.
+
 ## [1.0.0] - 2025-01-01
 
 Initial public release.

@@ -1,6 +1,6 @@
 [package]
 name        = "wraith"
-version     = "1.0.0"
+version     = "1.0.1"
 edition     = "2021"
 authors     = ["shadow-dragon-2002"]
 description = "Physical input blocker — passes synthetic AI input, blocks hardware"
