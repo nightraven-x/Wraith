@@ -50,8 +50,8 @@ END
 
 // Version information block (raw numeric values -- no #include <windows.h> needed)
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION     1,0,0,0
-PRODUCTVERSION  1,0,0,0
+FILEVERSION     1,1,0,0
+PRODUCTVERSION  1,1,0,0
 FILEFLAGSMASK   0x0000003FL
 FILEFLAGS       0
 FILEOS          0x00040004L
@@ -64,12 +64,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "shadow-dragon-2002"
             VALUE "FileDescription",  "Wraith - Physical Input Blocker"
-            VALUE "FileVersion",      "1.0.0"
+            VALUE "FileVersion",      "1.1.0"
             VALUE "InternalName",     "wraith"
             VALUE "LegalCopyright",   "GNU General Public License v3.0"
             VALUE "OriginalFilename", "wraith.exe"
             VALUE "ProductName",      "Wraith"
-            VALUE "ProductVersion",   "1.0.0"
+            VALUE "ProductVersion",   "1.1.0"
         END
     END
     BLOCK "VarFileInfo"
